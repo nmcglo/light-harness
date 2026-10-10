@@ -6,8 +6,16 @@
 # unset ones are left as-is.
 #
 # `providers:` defines the endpoints you can use. Each provider lists the models it
-# offers (the set you can switch among). `agent:` selects which provider + model the
-# loop uses, and which tools (opt-in) it may call.
+# offers (the set you can switch among).
+#
+# `agents:` is a list of named agents. Each agent picks a `provider`, `model`, an
+# optional `tools` list (opt-in), and an optional `persona` (a key under `personas:`).
+#
+# `personas:` maps a name to a set of file contents (e.g. `SOUL.md`). The `SOUL.md`
+# value of a persona becomes the system prompt for any agent that references it.
+#
+# `interaction:` names which agent each interaction uses. `chat.agent` is the agent
+# the `agent chat` loop runs.
 #
 # Env overrides: AGENT_PROVIDER, AGENT_MODEL, AGENT_BASE_URL, AGENT_API_KEY
 # (or OPENAI_API_KEY), AGENT_TIMEOUT. AGENT_RESPONDER_HOME overrides the home dir.
@@ -26,11 +34,27 @@ providers:
       - gpt-4o-mini
       - gpt-4o
 
-agent:
-  provider: local
-  model: qwen3.8:27b
-  # Optional opt-in list of built-in tools (echo, current_time, add).
-  # Omit for all built-in tools; [] for none; list names to enable a subset.
-  tools:
-    - echo
-    - add
+agents:
+  - name: assistant
+    provider: local
+    model: qwen3.8:27b
+    # Optional opt-in list of built-in tools (echo, current_time, add).
+    # Omit for all built-in tools; [] for none; list names to enable a subset.
+    tools:
+      - echo
+      - add
+    # Optional persona (a key under `personas:`); its SOUL.md becomes the system prompt.
+    persona: default
+  - name: terse
+    provider: openai
+    model: gpt-4o-mini
+
+personas:
+  default:
+    # The SOUL.md value becomes the system prompt for agents referencing this persona.
+    SOUL.md: You are a helpful, concise assistant.
+
+interaction:
+  chat:
+    # The agent the `agent chat` loop runs (a name under `agents:`).
+    agent: assistant

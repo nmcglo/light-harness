@@ -2,6 +2,7 @@
 
 ``agent chat "prompt"`` runs a single turn; ``agent chat`` (no prompt) drops into
 an interactive REPL. ``agent tools`` lists the registered tools.
+``agent web`` serves a small web UI for viewing and editing the config file.
 
 The commands are synchronous Typer commands that drive the async agent via
 ``asyncio.run`` -- this keeps the entrypoint portable across Typer versions.
@@ -19,13 +20,18 @@ from .agent import Agent
 from .config import Config, Settings
 from .llm import OpenAICompatibleClient
 from .tools import ToolRegistry, build_tool_registry
+from .web import serve_config
 
 app = typer.Typer(help="Agentic responder scaffold.")
 console = Console()
 
 
-def _build_agent(settings: Settings, tools: ToolRegistry) -> Agent:
-    return Agent(client=OpenAICompatibleClient(settings), tools=tools)
+def _build_agent(
+    settings: Settings, tools: ToolRegistry, system_prompt: str
+) -> Agent:
+    return Agent(
+        client=OpenAICompatibleClient(settings), tools=tools, system_prompt=system_prompt
+    )
 
 
 @app.command()
@@ -41,6 +47,7 @@ def chat(
 ) -> None:
     """Run a single prompt, or drop into an interactive REPL."""
     config = Config.load()
+    active = config.active_agent()
     settings = config.endpoint()
     if model:
         settings.model = model
@@ -52,17 +59,27 @@ def chat(
         )
         raise typer.Exit(code=1)
 
-    registry = build_tool_registry(config.agent.tools)
-    asyncio.run(_run_agent(_build_agent(settings, registry), prompt))
+    registry = build_tool_registry(active.tools)
+    system_prompt = config.system_prompt_for(active)
+    asyncio.run(_run_agent(_build_agent(settings, registry, system_prompt), prompt))
 
 
 @app.command()
 def tools() -> None:
     """List the tools the agent will use (per the current config)."""
-    registry = build_tool_registry(Config.load().agent.tools)
+    registry = build_tool_registry(Config.load().active_agent().tools)
     for spec in registry.tool_schemas():
         fn = spec["function"]
         console.print(f"[bold]{fn['name']}[/bold] -- {fn['description']}")
+
+
+@app.command()
+def web(
+    host: Annotated[str, typer.Option("--host", help="Bind host.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Bind port.")] = 8765,
+) -> None:
+    """Serve a web UI for viewing and editing the config file."""
+    serve_config(host=host, port=port)
 
 
 async def _run_agent(agent: Agent, prompt: str) -> None:

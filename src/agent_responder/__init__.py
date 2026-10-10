@@ -17,7 +17,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .agent import Agent
-from .config import AgentConfig, Config, Provider, Settings
+from .config import AgentConfig, Config, Interaction, InteractionChat, Provider, Settings
 from .llm import (
     ChatMessage,
     LLMClient,
@@ -33,6 +33,8 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "Config",
+    "Interaction",
+    "InteractionChat",
     "Conversation",
     "ChatMessage",
     "LLMClient",
