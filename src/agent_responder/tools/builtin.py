@@ -6,10 +6,21 @@ Add your own tools the same way and register them in a :class:`ToolRegistry`.
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .base import Tool
+from .edit_diff import (
+    EditError,
+    apply_edits,
+    detect_line_ending,
+    generate_diff,
+    normalize_to_lf,
+    restore_line_endings,
+    split_bom,
+)
 
 if TYPE_CHECKING:
     from . import ToolRegistry
@@ -56,9 +67,289 @@ class AddTool:
         return str(arguments["a"] + arguments["b"])
 
 
+_READ_MAX_LINES = 2000
+_READ_MAX_BYTES = 50 * 1024
+
+
+def _format_size(num_bytes: int) -> str:
+    """Format a byte count as a human-readable size (B/KB/MB)."""
+    if num_bytes < 1024:
+        return f"{num_bytes}B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f}KB"
+    return f"{num_bytes / 1024 / 1024:.1f}MB"
+
+
+def _truncate_head(
+    text: str, max_lines: int, max_bytes: int
+) -> tuple[str, bool, str | None, int]:
+    """Truncate ``text`` from the head to ``max_lines``/``max_bytes`` (whole lines).
+
+    Returns ``(content, truncated, truncated_by, output_lines)`` where
+    ``truncated_by`` is ``"lines"``, ``"bytes"``, or ``None``.
+    """
+    lines = text.split("\n")
+    total_lines = len(lines)
+    total_bytes = len(text.encode("utf-8"))
+    if total_lines <= max_lines and total_bytes <= max_bytes:
+        return text, False, None, total_lines
+    if lines and len(lines[0].encode("utf-8")) > max_bytes:
+        return "", True, "bytes", 0
+    out: list[str] = []
+    out_bytes = 0
+    truncated_by = "lines"
+    for i, line in enumerate(lines):
+        if i >= max_lines:
+            break
+        line_bytes = len(line.encode("utf-8")) + (1 if i > 0 else 0)
+        if out_bytes + line_bytes > max_bytes:
+            truncated_by = "bytes"
+            break
+        out.append(line)
+        out_bytes += line_bytes
+    if len(out) >= max_lines and out_bytes <= max_bytes:
+        truncated_by = "lines"
+    return "\n".join(out), True, truncated_by, len(out)
+
+
+class ReadFileTool:
+    """Read a file and return its text, optionally a slice of lines.
+
+    Large reads are truncated to a line/byte cap with a hint for how to continue.
+    """
+
+    name = "read_file"
+    description = (
+        "Read a file from disk and return its text. Optionally start at offset "
+        "(1-based line number) and/or return at most limit lines. Large reads are "
+        "truncated to a line/byte cap and end with a hint for how to continue."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path to the file to read."},
+            "offset": {"type": "integer", "description": "1-based start line (default 1)."},
+            "limit": {"type": "integer", "description": "Maximum number of lines to return."},
+        },
+        "required": ["path"],
+    }
+
+    async def run(self, arguments: dict[str, Any]) -> str:
+        path = str(arguments["path"])
+        offset = int(arguments.get("offset") or 1)
+        limit = arguments.get("limit")
+        start = max(offset, 1) - 1
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except FileNotFoundError:
+            return f"Error: no such file: {path}"
+        except IsADirectoryError:
+            return f"Error: is a directory: {path}"
+        except PermissionError:
+            return f"Error: permission denied: {path}"
+        except UnicodeDecodeError:
+            return f"Error: {path} is not valid UTF-8 text."
+
+        all_lines = text.split("\n")
+        total = len(all_lines)
+        if start >= total:
+            return f"Offset {offset} is beyond end of file ({total} lines total)."
+        start_display = start + 1
+        if limit is not None:
+            end = min(start + int(limit), total)
+            selected = "\n".join(all_lines[start:end])
+            user_limited = end - start
+        else:
+            selected = "\n".join(all_lines[start:])
+            user_limited = None
+
+        content, truncated, truncated_by, output_lines = _truncate_head(
+            selected, _READ_MAX_LINES, _READ_MAX_BYTES
+        )
+        if truncated and output_lines == 0:
+            first_bytes = len(all_lines[start].encode("utf-8"))
+            return (
+                f"Line {start_display} is {_format_size(first_bytes)}, exceeds the "
+                f"{_format_size(_READ_MAX_BYTES)} limit. Use a smaller limit or a narrower range."
+            )
+        if truncated:
+            end_display = start_display + output_lines - 1
+            next_offset = end_display + 1
+            limit_note = (
+                f" ({_format_size(_READ_MAX_BYTES)} limit)" if truncated_by == "bytes" else ""
+            )
+            return (
+                f"{content}\n\n[Showing lines {start_display}-{end_display} of {total}"
+                f"{limit_note}. Use offset={next_offset} to continue.]"
+            )
+        if user_limited is not None and start + user_limited < total:
+            remaining = total - (start + user_limited)
+            next_offset = start + user_limited + 1
+            return (
+                f"{content}\n\n[{remaining} more lines in file. "
+                f"Use offset={next_offset} to continue.]"
+            )
+        return content
+
+
+class WriteFileTool:
+    """Create or overwrite a file. Use only for new files or complete rewrites."""
+
+    name = "write_file"
+    description = (
+        "Create or overwrite a file. Automatically creates parent directories. "
+        "Use write only for new files or complete rewrites; prefer edit_file for "
+        "partial changes."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path to the file to write."},
+            "content": {"type": "string", "description": "Full content to write."},
+        },
+        "required": ["path", "content"],
+    }
+
+    async def run(self, arguments: dict[str, Any]) -> str:
+        path = str(arguments["path"])
+        content = arguments.get("content") or ""
+        parent = os.path.dirname(path)
+        try:
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except (OSError, PermissionError) as exc:
+            return f"Error: {type(exc).__name__}: {exc}"
+        return f"Wrote {len(content)} characters to {path}."
+
+
+def _prepare_edits(arguments: dict[str, Any]) -> list[tuple[str, str]]:
+    """Normalize the accepted edit argument forms into ``(old_text, new_text)`` pairs.
+
+    Accepts ``edits`` as a list, a single ``{old_text, new_text}`` object, or a JSON
+    string, plus a top-level ``old_text``/``new_text`` shorthand.
+    """
+    edits = arguments.get("edits")
+    if isinstance(edits, str):
+        try:
+            edits = json.loads(edits)
+        except (ValueError, TypeError):
+            edits = None
+    collected: list[tuple[str, str]] = []
+    if isinstance(edits, dict):
+        edits = [edits]
+    if isinstance(edits, list):
+        for entry in edits:
+            if isinstance(entry, dict):
+                old = entry.get("old_text")
+                new = entry.get("new_text")
+                if isinstance(old, str) and isinstance(new, str):
+                    collected.append((old, new))
+    old = arguments.get("old_text")
+    new = arguments.get("new_text")
+    if isinstance(old, str) and isinstance(new, str):
+        collected.append((old, new))
+    return collected
+
+
+class EditFileTool:
+    """Apply one or more exact-text replacements to a file.
+
+    Mirrors Pi's ``edit`` tool: every edit is matched against the original file,
+    each ``old_text`` must be unique and non-overlapping, and the BOM, the original
+    line endings, and unchanged lines are preserved. Returns a diff of the changes.
+    """
+
+    name = "edit_file"
+    description = (
+        "Edit a file using one or more exact-text replacements. Provide edits as a "
+        "list of {old_text, new_text} pairs; each old_text must be unique and must "
+        "not overlap the others. A single {old_text, new_text} pair is accepted as a "
+        "shorthand. Returns a diff of the changes."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path to the file to edit."},
+            "edits": {
+                "type": "array",
+                "description": "One or more targeted replacements.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_text": {
+                            "type": "string",
+                            "description": "Exact text to find (must be unique).",
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Replacement text.",
+                        },
+                    },
+                    "required": ["old_text", "new_text"],
+                },
+            },
+            "old_text": {
+                "type": "string",
+                "description": "Shorthand: text to find for a single edit.",
+            },
+            "new_text": {
+                "type": "string",
+                "description": "Shorthand: replacement text for old_text.",
+            },
+        },
+        "required": ["path"],
+    }
+
+    async def run(self, arguments: dict[str, Any]) -> str:
+        path = str(arguments["path"])
+        edits = _prepare_edits(arguments)
+        if not edits:
+            return (
+                "Error: edit_file requires at least one replacement "
+                "(edits, or old_text/new_text)."
+            )
+        try:
+            with open(path, "rb") as f:
+                raw_bytes = f.read()
+        except FileNotFoundError:
+            return f"Error: no such file: {path}"
+        except IsADirectoryError:
+            return f"Error: is a directory: {path}"
+        except PermissionError:
+            return f"Error: permission denied: {path}"
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"Error: {path} is not valid UTF-8 text."
+        try:
+            bom, content = split_bom(raw)
+            ending = detect_line_ending(content)
+            normalized = normalize_to_lf(content)
+            base, new = apply_edits(normalized, edits, path)
+            final = bom + restore_line_endings(new, ending)
+            with open(path, "wb") as f:
+                f.write(final.encode("utf-8"))
+        except EditError as exc:
+            return f"Error: {exc}"
+        except (OSError, PermissionError) as exc:
+            return f"Error: {type(exc).__name__}: {exc}"
+        diff = generate_diff(base, new, path)
+        return f"Successfully replaced {len(edits)} block(s) in {path}.\n{diff}"
+
+
 def builtin_tools() -> list[Tool]:
     """The built-in tools, in registration order."""
-    return [EchoTool(), CurrentTimeTool(), AddTool()]
+    return [
+        EchoTool(),
+        CurrentTimeTool(),
+        AddTool(),
+        ReadFileTool(),
+        WriteFileTool(),
+        EditFileTool(),
+    ]
 
 
 def default_registry() -> ToolRegistry:

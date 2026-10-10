@@ -73,7 +73,7 @@ def test_serves_html_page(web_base: str) -> None:
 def test_get_tools(web_base: str) -> None:
     status, data = _get_json(web_base + "/api/tools")
     assert status == 200
-    assert data["tools"] == ["echo", "current_time", "add"]
+    assert data["tools"] == ["echo", "current_time", "add", "read_file", "write_file", "edit_file"]
 
 
 def test_get_config_absent(web_base: str) -> None:
