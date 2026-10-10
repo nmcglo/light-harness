@@ -17,7 +17,19 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .agent import Agent
-from .config import AgentConfig, Config, Interaction, InteractionChat, Provider, Settings
+from .config import (
+    AgentConfig,
+    Config,
+    Interaction,
+    InteractionChat,
+    Provider,
+    Settings,
+    ensure_persona,
+    persona_dir,
+    persona_sessions_dir,
+    persona_soul_path,
+    personas_home,
+)
 from .llm import (
     ChatMessage,
     LLMClient,
@@ -25,6 +37,7 @@ from .llm import (
     OpenAICompatibleClient,
     ToolCall,
 )
+from .sessions import SessionLog
 from .state import Conversation
 from .tools import Tool, ToolRegistry, default_registry
 
@@ -46,4 +59,10 @@ __all__ = [
     "ToolRegistry",
     "ToolCall",
     "default_registry",
+    "SessionLog",
+    "ensure_persona",
+    "persona_dir",
+    "persona_sessions_dir",
+    "persona_soul_path",
+    "personas_home",
 ]

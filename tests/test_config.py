@@ -12,6 +12,7 @@ from agent_responder.config import (
     Config,
     config_file_path,
     config_home,
+    ensure_persona,
     load_yaml,
     resolve_env,
 )
@@ -391,3 +392,45 @@ def test_parse_interaction() -> None:
     assert _parse_interaction({"chat": {"agent": "x"}}).chat.agent == "x"
     assert _parse_interaction(None).chat.agent == "default"
     assert _parse_interaction({"chat": "wrong"}).chat.agent == "default"
+
+
+def test_config_load_creates_persona_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_cfg(
+        tmp_path,
+        "personas:\n  helpful:\n    SOUL.md: You are a kind helper.\n",
+    )
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    Config.load()
+    persona_dir = tmp_path / "personas" / "helpful"
+    assert (persona_dir / "SOUL.md").read_text(encoding="utf-8") == "You are a kind helper."
+    assert (persona_dir / "sessions").is_dir()
+
+
+def test_system_prompt_is_read_from_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_cfg(
+        tmp_path,
+        "personas:\n  helpful:\n    SOUL.md: You are a kind helper.\n",
+    )
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    agent = AgentConfig(persona="helpful")
+    assert Config.load().system_prompt_for(agent) == "You are a kind helper."
+
+    # Editing the on-disk SOUL.md changes the prompt: disk is the source of truth.
+    soul = tmp_path / "personas" / "helpful" / "SOUL.md"
+    soul.write_text("You are a sassy helper.", encoding="utf-8")
+    assert Config.load().system_prompt_for(agent) == "You are a sassy helper."
+
+
+def test_ensure_persona_does_not_overwrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    ensure_persona("custom", seed="initial seed")
+    soul = tmp_path / "personas" / "custom" / "SOUL.md"
+    assert soul.read_text(encoding="utf-8") == "initial seed"
+    assert (tmp_path / "personas" / "custom" / "sessions").is_dir()
+
+    # A later ensure with a different seed must not overwrite the existing file.
+    ensure_persona("custom", seed="second seed")
+    assert soul.read_text(encoding="utf-8") == "initial seed"
