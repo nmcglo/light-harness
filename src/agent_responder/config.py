@@ -55,6 +55,55 @@ def config_file_path() -> Path:
     """Path to the config file inside :func:`config_home`."""
     return config_home() / CONFIG_FILENAME
 
+SOUL_FILENAME = "SOUL.md"
+
+
+def personas_home() -> Path:
+    """The ``personas/`` directory under :func:`config_home`."""
+    return config_home() / "personas"
+
+
+def persona_dir(name: str) -> Path:
+    """The directory for a single named persona."""
+    return personas_home() / name
+
+
+def persona_soul_path(name: str) -> Path:
+    """Path to a persona's stored ``SOUL.md``."""
+    return persona_dir(name) / SOUL_FILENAME
+
+
+def persona_sessions_dir(name: str) -> Path:
+    """Path to a persona's ``sessions/`` directory (conversation logs)."""
+    return persona_dir(name) / "sessions"
+
+
+def _valid_persona_name(name: str) -> bool:
+    """True if ``name`` is a safe single path segment (no path traversal)."""
+    return (
+        bool(name)
+        and name not in (".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and "\x00" not in name
+    )
+
+
+def ensure_persona(name: str, seed: str = "") -> Path:
+    """Ensure ``personas/<name>/`` exists with ``SOUL.md`` and ``sessions/``.
+
+    Creates the directory tree and, on first creation only, writes ``SOUL.md``
+    from ``seed`` (the persona's inline ``SOUL.md`` from the config file). An
+    existing ``SOUL.md`` is never overwritten. Returns the persona directory.
+    """
+    directory = persona_dir(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    soul = persona_soul_path(name)
+    if not soul.exists():
+        soul.write_text(seed, encoding="utf-8")
+    persona_sessions_dir(name).mkdir(parents=True, exist_ok=True)
+    return directory
+
 
 def load_yaml(path: Path) -> dict[str, Any]:
     """Parse the YAML config file. Returns ``{}`` if missing, empty, or invalid."""
@@ -258,11 +307,18 @@ class Config:
     @classmethod
     def load(cls) -> Config:
         raw = _resolve_env_in_value(load_yaml(config_file_path()))
+        providers = _parse_providers(raw.get("providers"))
+        agents = _parse_agents(raw.get("agents"))
+        personas = _parse_personas(raw.get("personas"))
+        interaction = _parse_interaction(raw.get("interaction"))
+        for name, files in personas.items():
+            if _valid_persona_name(name):
+                ensure_persona(name, files.get(SOUL_FILENAME, ""))
         return cls(
-            providers=_parse_providers(raw.get("providers")),
-            agents=_parse_agents(raw.get("agents")),
-            personas=_parse_personas(raw.get("personas")),
-            interaction=_parse_interaction(raw.get("interaction")),
+            providers=providers,
+            agents=agents,
+            personas=personas,
+            interaction=interaction,
         )
 
     def active_agent(self) -> AgentConfig:
@@ -290,12 +346,13 @@ class Config:
         return Settings.from_sources(file_values)
 
     def system_prompt_for(self, agent: AgentConfig) -> str:
-        """The system prompt for ``agent``: its persona's ``SOUL.md`` if set,
-        else the built-in default."""
-        if agent.persona:
+        """The system prompt for ``agent``: its persona's stored ``SOUL.md``
+        (under ``AGENT_RESPONDER_HOME``) if set, else the built-in default."""
+        if agent.persona and _valid_persona_name(agent.persona):
             persona = self.personas.get(agent.persona)
             if persona:
-                soul = persona.get("SOUL.md")
-                if soul:
+                ensure_persona(agent.persona, persona.get(SOUL_FILENAME, ""))
+                soul = persona_soul_path(agent.persona).read_text(encoding="utf-8")
+                if soul.strip():
                     return soul
         return DEFAULT_SYSTEM_PROMPT

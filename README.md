@@ -43,6 +43,9 @@ uv run mypy
 The loop stops when the model stops calling tools or `max_steps` is reached.
 Tool errors are returned to the model as strings rather than raising, so the
 agent can recover.
+Each chat session is appended to a JSONL log under the active agent's persona
+directory (`personas/<name>/sessions/`), capturing the user prompts, assistant
+replies, tool calls, and tool results.
 
 ## Configuration
 
@@ -64,9 +67,10 @@ The file is sectioned:
 - `agents:` — a list of named agents. Each picks a `provider` and `model`,
   plus an optional `tools` list (opt-in: omit for all built-in tools, `[]` for
   none, or name a subset) and an optional `persona` (a key into `personas:`).
-- `personas:` — maps a name to a set of file contents (e.g. `SOUL.md`). The
-  `SOUL.md` value of a persona becomes the system prompt for any agent that
-  references it.
+- `personas:` — names a persona. Each named persona gets a directory under
+  `AGENT_RESPONDER_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
+  `sessions/` directory of conversation logs. The `SOUL.md` value seeds that file
+  on first run and becomes the system prompt for any agent that references it.
 - `interaction:` — names which agent each interaction uses; `chat.agent` is
   the agent the `agent chat` loop runs.
 

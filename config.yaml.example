@@ -11,8 +11,10 @@
 # `agents:` is a list of named agents. Each agent picks a `provider`, `model`, an
 # optional `tools` list (opt-in), and an optional `persona` (a key under `personas:`).
 #
-# `personas:` maps a name to a set of file contents (e.g. `SOUL.md`). The `SOUL.md`
-# value of a persona becomes the system prompt for any agent that references it.
+# `personas:` names the personas. Each named persona gets a directory under
+# AGENT_RESPONDER_HOME -- personas/<name>/ -- holding its SOUL.md plus a sessions/
+# directory of conversation logs. The SOUL.md value below seeds that file on first
+# run and becomes the system prompt for any agent that references the persona.
 #
 # `interaction:` names which agent each interaction uses. `chat.agent` is the agent
 # the `agent chat` loop runs.
@@ -50,8 +52,10 @@ agents:
     model: gpt-4o-mini
 
 personas:
+  # A named persona. Each gets AGENT_RESPONDER_HOME/personas/<name>/ holding its
+  # SOUL.md and a sessions/ directory of conversation logs. The SOUL.md value seeds
+  # the file on first run and becomes the system prompt for agents using this persona.
   default:
-    # The SOUL.md value becomes the system prompt for agents referencing this persona.
     SOUL.md: You are a helpful, concise assistant.
 
 interaction:

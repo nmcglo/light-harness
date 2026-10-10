@@ -17,8 +17,9 @@ import typer
 from rich.console import Console
 
 from .agent import Agent
-from .config import Config, Settings
+from .config import Config, Settings, ensure_persona, persona_sessions_dir
 from .llm import OpenAICompatibleClient
+from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
 from .web import serve_config
 
@@ -27,10 +28,16 @@ console = Console()
 
 
 def _build_agent(
-    settings: Settings, tools: ToolRegistry, system_prompt: str
+    settings: Settings,
+    tools: ToolRegistry,
+    system_prompt: str,
+    session: SessionLog | None = None,
 ) -> Agent:
     return Agent(
-        client=OpenAICompatibleClient(settings), tools=tools, system_prompt=system_prompt
+        client=OpenAICompatibleClient(settings),
+        tools=tools,
+        system_prompt=system_prompt,
+        session=session,
     )
 
 
@@ -61,7 +68,17 @@ def chat(
 
     registry = build_tool_registry(active.tools)
     system_prompt = config.system_prompt_for(active)
-    asyncio.run(_run_agent(_build_agent(settings, registry, system_prompt), prompt))
+    persona_name = active.persona or active.name
+    ensure_persona(persona_name)
+    session = SessionLog(
+        persona_sessions_dir(persona_name),
+        meta={"persona": persona_name, "agent": active.name, "model": settings.model},
+    )
+    agent = _build_agent(settings, registry, system_prompt, session=session)
+    try:
+        asyncio.run(_run_agent(agent, prompt))
+    finally:
+        session.close()
 
 
 @app.command()

@@ -6,6 +6,7 @@ is exhausted.
 from __future__ import annotations
 
 from .llm import ChatMessage, LLMClient
+from .sessions import SessionLog
 from .state import Conversation
 from .tools import ToolRegistry
 
@@ -21,12 +22,14 @@ class Agent:
         tools: ToolRegistry,
         system_prompt: str = "You are a helpful assistant.",
         max_steps: int = 8,
+        session: SessionLog | None = None,
     ) -> None:
         self.client = client
         self.tools = tools
         self.system_prompt = system_prompt
         self.max_steps = max(1, max_steps)
         self.conversation = Conversation()
+        self.session = session
 
     def reset(self) -> None:
         """Clear the conversation history (start a fresh session)."""
@@ -34,7 +37,7 @@ class Agent:
 
     async def run(self, user_input: str) -> str:
         """Run one turn of the loop and return the final assistant answer."""
-        self.conversation.add_user(user_input)
+        self._remember(ChatMessage(role="user", content=user_input))
 
         for _ in range(self.max_steps):
             messages = [
@@ -46,14 +49,27 @@ class Agent:
             )
 
             if response.tool_calls:
-                self.conversation.add_assistant(
-                    response.message.content, tool_calls=response.tool_calls
+                self._remember(
+                    ChatMessage(
+                        role="assistant",
+                        content=response.message.content,
+                        tool_calls=response.tool_calls,
+                    )
                 )
                 for call in response.tool_calls:
                     result = await self.tools.run(call.name, call.arguments)
-                    self.conversation.add_tool(call.id, result)
+                    self._remember(
+                        ChatMessage(role="tool", tool_call_id=call.id, content=result)
+                    )
             else:
-                self.conversation.add_assistant(response.message.content)
-                return response.message.content
+                final = response.message.content
+                self._remember(ChatMessage(role="assistant", content=final))
+                return final
 
         return _STOPPED_MESSAGE
+
+    def _remember(self, message: ChatMessage) -> None:
+        """Append ``message`` to the conversation and to the session log, if any."""
+        self.conversation.add(message)
+        if self.session is not None:
+            self.session.record(message)

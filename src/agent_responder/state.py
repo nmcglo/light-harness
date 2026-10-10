@@ -16,18 +16,20 @@ class Conversation(BaseModel):
 
     messages: list[ChatMessage] = Field(default_factory=list)
 
+    def add(self, message: ChatMessage) -> None:
+        """Append a message to the history."""
+        self.messages.append(message)
+
     def add_user(self, content: str) -> None:
-        self.messages.append(ChatMessage(role="user", content=content))
+        self.add(ChatMessage(role="user", content=content))
 
     def add_assistant(
         self, content: str, tool_calls: list[ToolCall] | None = None
     ) -> None:
-        self.messages.append(
-            ChatMessage(role="assistant", content=content, tool_calls=tool_calls)
-        )
+        self.add(ChatMessage(role="assistant", content=content, tool_calls=tool_calls))
 
     def add_tool(self, tool_call_id: str, content: str) -> None:
-        self.messages.append(ChatMessage(role="tool", tool_call_id=tool_call_id, content=content))
+        self.add(ChatMessage(role="tool", tool_call_id=tool_call_id, content=content))
 
     def reset(self) -> None:
         self.messages.clear()
