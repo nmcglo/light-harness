@@ -16,16 +16,16 @@ import typer
 from rich.console import Console
 
 from .agent import Agent
-from .config import Settings
+from .config import Config, Settings
 from .llm import OpenAICompatibleClient
-from .tools import default_registry
+from .tools import ToolRegistry, build_tool_registry
 
 app = typer.Typer(help="Agentic responder scaffold.")
 console = Console()
 
 
-def _build_agent(settings: Settings) -> Agent:
-    return Agent(client=OpenAICompatibleClient(settings), tools=default_registry())
+def _build_agent(settings: Settings, tools: ToolRegistry) -> Agent:
+    return Agent(client=OpenAICompatibleClient(settings), tools=tools)
 
 
 @app.command()
@@ -40,7 +40,8 @@ def chat(
     ] = None,
 ) -> None:
     """Run a single prompt, or drop into an interactive REPL."""
-    settings = Settings.from_env()
+    config = Config.load()
+    settings = config.endpoint()
     if model:
         settings.model = model
     if base_url:
@@ -51,13 +52,15 @@ def chat(
         )
         raise typer.Exit(code=1)
 
-    asyncio.run(_run_agent(_build_agent(settings), prompt))
+    registry = build_tool_registry(config.agent.tools)
+    asyncio.run(_run_agent(_build_agent(settings, registry), prompt))
 
 
 @app.command()
 def tools() -> None:
-    """List the tools registered with the default tool registry."""
-    for spec in default_registry().tool_schemas():
+    """List the tools the agent will use (per the current config)."""
+    registry = build_tool_registry(Config.load().agent.tools)
+    for spec in registry.tool_schemas():
         fn = spec["function"]
         console.print(f"[bold]{fn['name']}[/bold] -- {fn['description']}")
 

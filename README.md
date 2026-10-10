@@ -43,6 +43,30 @@ The loop stops when the model stops calling tools or `max_steps` is reached.
 Tool errors are returned to the model as strings rather than raising, so the
 agent can recover.
 
+## Configuration
+
+Settings load with this precedence: **environment variable > config file >
+built-in default**. The file is optional.
+
+- **Config file**: `$AGENT_RESPONDER_HOME/config.yaml` (default home
+  `$HOME/.agent-responder/config.yaml`). See `config.yaml.example` for a template.
+- **Env vars**: `AGENT_PROVIDER`, `AGENT_MODEL`, `AGENT_BASE_URL`,
+  `AGENT_API_KEY` (or `OPENAI_API_KEY`), `AGENT_TIMEOUT`.
+  `AGENT_RESPONDER_HOME` overrides the config home directory.
+- **Env interpolation**: config values may use `$NAME` or `${NAME}`; set
+  variables are substituted, unset ones are left as-is.
+
+The file is sectioned:
+
+- `providers:` — named endpoints. Each has `base_url`, `api_key`, `timeout`,
+  and a `models` list (the models you can switch among).
+- `agent:` — picks the `provider` and `model` the loop uses, plus an optional
+  `tools` list (opt-in): omit for all built-in tools, `[]` for none, or name a
+  subset to enable.
+
+`Config.endpoint()` resolves those into the effective endpoint for the loop.
+New features add their own section (see `Config` in `config.py`).
+
 ## Extending it
 
 - **Add a tool**: implement `name` / `description` / `parameters` (JSON Schema)

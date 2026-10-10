@@ -17,7 +17,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .agent import Agent
-from .config import Settings
+from .config import AgentConfig, Config, Provider, Settings
 from .llm import (
     ChatMessage,
     LLMClient,
@@ -31,12 +31,15 @@ from .tools import Tool, ToolRegistry, default_registry
 __all__ = [
     "__version__",
     "Agent",
+    "AgentConfig",
+    "Config",
     "Conversation",
     "ChatMessage",
     "LLMClient",
     "LLMResponse",
     "OpenAICompatibleClient",
     "Settings",
+    "Provider",
     "Tool",
     "ToolRegistry",
     "ToolCall",
