@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .base import Tool
-from .builtin import default_registry
+from .builtin import build_tool_registry, builtin_tools, default_registry
 
 
 class ToolRegistry:
@@ -50,4 +50,4 @@ class ToolRegistry:
         return result if isinstance(result, str) else str(result)
 
 
-__all__ = ["Tool", "ToolRegistry", "default_registry"]
+__all__ = ["Tool", "ToolRegistry", "build_tool_registry", "builtin_tools", "default_registry"]

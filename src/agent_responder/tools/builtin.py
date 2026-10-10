@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from .base import Tool
+
 if TYPE_CHECKING:
     from . import ToolRegistry
 
@@ -54,11 +56,34 @@ class AddTool:
         return str(arguments["a"] + arguments["b"])
 
 
+def builtin_tools() -> list[Tool]:
+    """The built-in tools, in registration order."""
+    return [EchoTool(), CurrentTimeTool(), AddTool()]
+
+
 def default_registry() -> ToolRegistry:
-    """Build a registry preloaded with the built-in example tools."""
+    """Build a registry preloaded with all built-in tools."""
     from . import ToolRegistry  # local import avoids a circular import at load
 
     registry = ToolRegistry()
-    for tool in (EchoTool(), CurrentTimeTool(), AddTool()):
+    for tool in builtin_tools():
         registry.register(tool)
+    return registry
+
+
+def build_tool_registry(selection: list[str] | None) -> ToolRegistry:
+    """Build a registry from an opt-in tool selection.
+
+    ``None`` selects all built-in tools; a list selects only the named built-in
+    tools (unknown names are ignored); an empty list yields no tools.
+    """
+    from . import ToolRegistry  # local import avoids a circular import at load
+
+    if selection is None:
+        return default_registry()
+    registry = ToolRegistry()
+    wanted = set(selection)
+    for tool in builtin_tools():
+        if tool.name in wanted:
+            registry.register(tool)
     return registry

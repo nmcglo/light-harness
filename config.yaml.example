@@ -1,0 +1,36 @@
+# Example configuration file.
+#
+# Copy to $AGENT_RESPONDER_HOME/config.yaml (default: ~/.agent-responder/config.yaml).
+# The file is optional. Precedence for every value: env var > config file > default.
+# Values may reference env vars ($NAME or ${NAME}); set vars are substituted,
+# unset ones are left as-is.
+#
+# `providers:` defines the endpoints you can use. Each provider lists the models it
+# offers (the set you can switch among). `agent:` selects which provider + model the
+# loop uses, and which tools (opt-in) it may call.
+#
+# Env overrides: AGENT_PROVIDER, AGENT_MODEL, AGENT_BASE_URL, AGENT_API_KEY
+# (or OPENAI_API_KEY), AGENT_TIMEOUT. AGENT_RESPONDER_HOME overrides the home dir.
+
+providers:
+  local:
+    base_url: http://127.0.0.1:8000/v1
+    api_key: $LOCAL_API_KEY
+    timeout: 60
+    models:
+      - qwen3.8:27b
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: $OPENAI_API_KEY
+    models:
+      - gpt-4o-mini
+      - gpt-4o
+
+agent:
+  provider: local
+  model: qwen3.8:27b
+  # Optional opt-in list of built-in tools (echo, current_time, add).
+  # Omit for all built-in tools; [] for none; list names to enable a subset.
+  tools:
+    - echo
+    - add
