@@ -39,9 +39,13 @@ CFG = """
         api_key: openai-key
         models:
           - gpt-4o-mini
-    agent:
-      provider: local
-      model: qwen3.8:27b
+    agents:
+      - name: assistant
+        provider: local
+        model: qwen3.8:27b
+    interaction:
+      chat:
+        agent: assistant
 """
 
 
@@ -73,7 +77,7 @@ def test_switching_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     cfg = Config.load()
-    cfg.agent = AgentConfig(provider="openai", model="gpt-4o-mini")
+    cfg.agents = [AgentConfig(name="assistant", provider="openai", model="gpt-4o-mini")]
     e = cfg.endpoint()
     assert (e.model, e.base_url, e.api_key) == (
         "gpt-4o-mini",
@@ -124,7 +128,7 @@ def test_openai_api_key_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_missing_provider_uses_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "agent:\n  provider: nope\n  model: some-model\n")
+    _write_cfg(tmp_path, "agents:\n  - name: a\n    provider: nope\n    model: some-model\n")
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     e = Config.load().endpoint()
@@ -133,7 +137,7 @@ def test_missing_provider_uses_defaults(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_malformed_providers_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "providers: [not-a-dict]\nagent:\n  model: m\n")
+    _write_cfg(tmp_path, "providers: [not-a-dict]\nagents:\n  - name: a\n    model: m\n")
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     e = Config.load().endpoint()
@@ -142,7 +146,10 @@ def test_malformed_providers_section(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_extra_provider_keys_tolerated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = "providers:\n  local:\n    base_url: http://x/v1\n    unknown: 1\nagent:\n  model: m\n"
+    cfg = (
+        "providers:\n  local:\n    base_url: http://x/v1\n    unknown: 1\n"
+        "agents:\n  - name: a\n    model: m\n"
+    )
     _write_cfg(tmp_path, cfg)
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
@@ -185,19 +192,22 @@ def test_build_registry_ignores_unknown() -> None:
 
 
 def test_agent_tools_opt_in_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "agent:\n  model: m\n  tools:\n    - echo\n    - add\n")
+    _write_cfg(
+        tmp_path,
+        "agents:\n  - name: a\n    model: m\n    tools:\n      - echo\n      - add\n",
+    )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     cfg = Config.load()
-    assert cfg.agent.tools == ["echo", "add"]
-    assert set(build_tool_registry(cfg.agent.tools).names()) == {"echo", "add"}
+    assert cfg.active_agent().tools == ["echo", "add"]
+    assert set(build_tool_registry(cfg.active_agent().tools).names()) == {"echo", "add"}
 
 
 def test_agent_tools_default_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "agent:\n  model: m\n")
+    _write_cfg(tmp_path, "agents:\n  - name: a\n    model: m\n")
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
-    assert Config.load().agent.tools is None
+    assert Config.load().active_agent().tools is None
 
 
 def test_resolve_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,7 +237,11 @@ def test_resolve_env_nonvar_and_plain() -> None:
 
 
 def test_file_env_value_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "providers:\n  local:\n    api_key: $MY_API_KEY\nagent:\n  model: m\n")
+    _write_cfg(
+        tmp_path,
+        "providers:\n  local:\n    api_key: $MY_API_KEY\n"
+        "agents:\n  - name: a\n    model: m\n",
+    )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     monkeypatch.setenv("MY_API_KEY", "resolved-key")
@@ -235,7 +249,11 @@ def test_file_env_value_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_file_env_unset_left_literal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "providers:\n  local:\n    api_key: $NO_SUCH_KEY\nagent:\n  model: m\n")
+    _write_cfg(
+        tmp_path,
+        "providers:\n  local:\n    api_key: $NO_SUCH_KEY\n"
+        "agents:\n  - name: a\n    model: m\n",
+    )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     monkeypatch.delenv("NO_SUCH_KEY", raising=False)
@@ -252,9 +270,124 @@ def test_file_env_value_in_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_env_override_beats_file_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "providers:\n  local:\n    api_key: $MY_API_KEY\nagent:\n  model: m\n")
+    _write_cfg(
+        tmp_path,
+        "providers:\n  local:\n    api_key: $MY_API_KEY\n"
+        "agents:\n  - name: a\n    model: m\n",
+    )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
     monkeypatch.setenv("MY_API_KEY", "from-file-env")
     monkeypatch.setenv("AGENT_API_KEY", "from-env-override")
     assert Config.load().endpoint().api_key == "from-env-override"
+
+
+def test_active_agent_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_text = (
+        "agents:\n"
+        "  - name: first\n"
+        "    provider: local\n"
+        "    model: a-model\n"
+        "  - name: second\n"
+        "    provider: openai\n"
+        "    model: b-model\n"
+        "interaction:\n"
+        "  chat:\n"
+        "    agent: second\n"
+    )
+    _write_cfg(tmp_path, cfg_text)
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    active = Config.load().active_agent()
+    assert active.name == "second"
+    assert active.model == "b-model"
+
+
+def test_active_agent_first_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_text = (
+        "agents:\n"
+        "  - name: first\n"
+        "    provider: local\n"
+        "    model: a-model\n"
+        "interaction:\n"
+        "  chat:\n"
+        "    agent: missing\n"
+    )
+    _write_cfg(tmp_path, cfg_text)
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    assert Config.load().active_agent().name == "first"
+
+
+def test_active_agent_empty_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_cfg(tmp_path, "providers:\n  local:\n    base_url: http://x/v1\n")
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    active = Config.load().active_agent()
+    assert active.name == "default"
+    assert active.provider == "local"
+
+
+def test_system_prompt_for_persona(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_text = (
+        "agents:\n"
+        "  - name: assistant\n"
+        "    provider: local\n"
+        "    model: m\n"
+        "    persona: helpful\n"
+        "personas:\n"
+        "  helpful:\n"
+        "    SOUL.md: You are a kind helper.\n"
+    )
+    _write_cfg(tmp_path, cfg_text)
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    cfg = Config.load()
+    assert cfg.system_prompt_for(cfg.active_agent()) == "You are a kind helper."
+
+
+def test_system_prompt_for_no_persona(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_cfg(tmp_path, "agents:\n  - name: assistant\n    provider: local\n    model: m\n")
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    cfg = Config.load()
+    assert cfg.system_prompt_for(cfg.active_agent()) == "You are a helpful assistant."
+
+
+def test_system_prompt_for_unknown_persona(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_text = (
+        "agents:\n"
+        "  - name: assistant\n"
+        "    provider: local\n"
+        "    model: m\n"
+        "    persona: ghost\n"
+    )
+    _write_cfg(tmp_path, cfg_text)
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    cfg = Config.load()
+    assert cfg.system_prompt_for(cfg.active_agent()) == "You are a helpful assistant."
+
+
+def test_parse_personas() -> None:
+    from agent_responder.config import _parse_personas
+
+    raw = {
+        "a": {"SOUL.md": "Hello", "other.txt": "x"},
+        "b": "not-a-dict",
+        "c": {"num": 3, "txt": "y"},
+    }
+    parsed = _parse_personas(raw)
+    assert parsed == {
+        "a": {"SOUL.md": "Hello", "other.txt": "x"},
+        "c": {"num": "3", "txt": "y"},
+    }
+    assert _parse_personas(None) == {}
+
+
+def test_parse_interaction() -> None:
+    from agent_responder.config import _parse_interaction
+
+    assert _parse_interaction({"chat": {"agent": "x"}}).chat.agent == "x"
+    assert _parse_interaction(None).chat.agent == "default"
+    assert _parse_interaction({"chat": "wrong"}).chat.agent == "default"

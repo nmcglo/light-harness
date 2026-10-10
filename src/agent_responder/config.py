@@ -39,6 +39,8 @@ DEFAULT_API_KEY = ""
 DEFAULT_TIMEOUT: float = 60.0
 DEFAULT_MODEL = "qwen3.8:27b"
 DEFAULT_PROVIDER_NAME = "local"
+DEFAULT_AGENT_NAME = "default"
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def config_home() -> Path:
@@ -116,14 +118,54 @@ def _parse_providers(raw: Any) -> dict[str, Provider]:
     return providers
 
 
-def _parse_agent(raw: Any) -> AgentConfig:
-    """Parse the ``agent:`` section, falling back to defaults."""
+def _parse_agents(raw: Any) -> list[AgentConfig]:
+    """Parse the ``agents:`` section. Entries without a usable ``name`` are
+    skipped; duplicates and malformed entries are dropped."""
+    if not isinstance(raw, list):
+        return []
+    agents: list[AgentConfig] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            agent = AgentConfig.model_validate(entry)
+        except ValidationError:
+            continue
+        if agent.name in seen:
+            continue
+        seen.add(agent.name)
+        agents.append(agent)
+    return agents
+
+
+def _parse_personas(raw: Any) -> dict[str, dict[str, str]]:
+    """Parse the ``personas:`` section: name -> {file: content} (strings only)."""
     if not isinstance(raw, dict):
-        return AgentConfig()
+        return {}
+    personas: dict[str, dict[str, str]] = {}
+    for name, content in raw.items():
+        if not isinstance(content, dict):
+            continue
+        personas[str(name)] = {
+            str(key): str(value)
+            for key, value in content.items()
+            if isinstance(value, (str, int, float))
+        }
+    return personas
+
+
+def _parse_interaction(raw: Any) -> Interaction:
+    """Parse the ``interaction:`` section, falling back to defaults."""
+    if not isinstance(raw, dict):
+        return Interaction()
     try:
-        return AgentConfig.model_validate(raw)
+        return Interaction.model_validate(raw)
     except ValidationError:
-        return AgentConfig()
+        return Interaction()
 
 
 class Provider(BaseModel):
@@ -138,16 +180,37 @@ class Provider(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Which provider + model the agent loop uses, and which tools it may call."""
+    """A named agent: which provider + model it uses, its tools, and its persona."""
 
     model_config = ConfigDict(extra="ignore")
 
+    name: str = DEFAULT_AGENT_NAME
     provider: str = DEFAULT_PROVIDER_NAME
     model: str = DEFAULT_MODEL
 
     # Optional opt-in list of built-in tool names. None (absent) -> all built-in
     # tools; [] -> no tools; [...] -> only the named tools.
     tools: list[str] | None = None
+
+    # Optional persona (a name in ``personas:``) that customizes this agent,
+    # e.g. via its ``SOUL.md`` (used as the system prompt).
+    persona: str | None = None
+
+
+class InteractionChat(BaseModel):
+    """The agent named for the ``chat`` interaction."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    agent: str = DEFAULT_AGENT_NAME
+
+
+class Interaction(BaseModel):
+    """Which named agent each interaction uses. Only ``chat`` exists for now."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    chat: InteractionChat = Field(default_factory=InteractionChat)
 
 
 class Settings(BaseModel):
@@ -172,32 +235,67 @@ class Settings(BaseModel):
 
 
 class Config:
-    """Top-level configuration: ``providers`` + ``agent`` selection.
+    """Top-level configuration: ``providers``, named ``agents``, ``personas``,
+    and ``interaction`` (which agent each interaction uses).
 
-    ``endpoint()`` resolves the effective :class:`Settings` for the loop. Add
-    further sections here as features grow (e.g. memory, retrieval).
+    ``endpoint()`` resolves the effective :class:`Settings` for the loop;
+    ``active_agent()`` picks the agent the ``chat`` loop uses; and
+    ``system_prompt_for()`` resolves an agent's persona (e.g. ``SOUL.md``).
     """
 
-    def __init__(self, providers: dict[str, Provider], agent: AgentConfig) -> None:
+    def __init__(
+        self,
+        providers: dict[str, Provider],
+        agents: list[AgentConfig],
+        personas: dict[str, dict[str, str]],
+        interaction: Interaction,
+    ) -> None:
         self.providers = providers
-        self.agent = agent
+        self.agents = agents
+        self.personas = personas
+        self.interaction = interaction
 
     @classmethod
     def load(cls) -> Config:
         raw = _resolve_env_in_value(load_yaml(config_file_path()))
         return cls(
             providers=_parse_providers(raw.get("providers")),
-            agent=_parse_agent(raw.get("agent")),
+            agents=_parse_agents(raw.get("agents")),
+            personas=_parse_personas(raw.get("personas")),
+            interaction=_parse_interaction(raw.get("interaction")),
         )
 
+    def active_agent(self) -> AgentConfig:
+        """The agent the ``chat`` loop uses: the one named by
+        ``interaction.chat.agent``, else the first agent, else a default."""
+        wanted = self.interaction.chat.agent
+        for agent in self.agents:
+            if agent.name == wanted:
+                return agent
+        if self.agents:
+            return self.agents[0]
+        return AgentConfig()
+
     def endpoint(self) -> Settings:
-        """Resolve the effective endpoint: env > selected provider/agent > default."""
-        provider_name = _env_value("provider") or self.agent.provider
+        """Resolve the effective endpoint: env > active agent/provider > default."""
+        agent = self.active_agent()
+        provider_name = _env_value("provider") or agent.provider
         provider = self.providers.get(provider_name) or Provider()
         file_values = {
-            "model": self.agent.model,
+            "model": agent.model,
             "base_url": provider.base_url,
             "api_key": provider.api_key,
             "timeout": provider.timeout,
         }
         return Settings.from_sources(file_values)
+
+    def system_prompt_for(self, agent: AgentConfig) -> str:
+        """The system prompt for ``agent``: its persona's ``SOUL.md`` if set,
+        else the built-in default."""
+        if agent.persona:
+            persona = self.personas.get(agent.persona)
+            if persona:
+                soul = persona.get("SOUL.md")
+                if soul:
+                    return soul
+        return DEFAULT_SYSTEM_PROMPT
