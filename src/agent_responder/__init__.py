@@ -24,6 +24,7 @@ from .config import (
     InteractionChat,
     Provider,
     Settings,
+    WebhookConfig,
     ensure_persona,
     persona_dir,
     persona_sessions_dir,
@@ -40,6 +41,7 @@ from .llm import (
 from .sessions import SessionLog
 from .state import Conversation
 from .tools import Tool, ToolRegistry, default_registry
+from .webhooks import create_webhook_server, parse_webhook_body, serve_webhooks
 
 __all__ = [
     "__version__",
@@ -65,4 +67,8 @@ __all__ = [
     "persona_sessions_dir",
     "persona_soul_path",
     "personas_home",
+    "WebhookConfig",
+    "create_webhook_server",
+    "parse_webhook_body",
+    "serve_webhooks",
 ]

@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from .config import config_file_path
+from .config import config_file_path, load_yaml
 from .tools import builtin_tools
 
 DEFAULT_HOST = "127.0.0.1"
@@ -594,9 +594,13 @@ def _yaml_number(text: str) -> int | float | str | None:
     return int(value) if value.is_integer() else value
 
 
-def _build_config_dict(payload: dict[str, Any]) -> dict[str, Any]:
-    """Build the config mapping (``providers`` + ``agents`` + ``personas`` +
-    ``interaction``) from the form JSON."""
+def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Build the config mapping from the form JSON.
+
+    The form manages ``providers``, ``agents``, ``personas``, and
+    ``interaction``; any other top-level keys (e.g. ``webhooks``) are carried
+    over unchanged from ``current`` (the config already on disk).
+    """
     data: dict[str, Any] = {}
 
     providers: dict[str, Any] = {}
@@ -683,6 +687,13 @@ def _build_config_dict(payload: dict[str, Any]) -> dict[str, Any]:
     if interaction:
         data["interaction"] = interaction
 
+    # Preserve top-level keys the form doesn't manage (e.g. ``webhooks``) so a
+    # save via the UI never drops them.
+    managed = {"providers", "agents", "personas", "interaction"}
+    for key, value in current.items():
+        if key not in managed:
+            data[key] = value
+
     return data
 
 
@@ -736,7 +747,8 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "Body must be a JSON object."})
             return
         try:
-            data = _build_config_dict(payload)
+            current = load_yaml(config_file_path())
+            data = _build_config_dict(payload, current)
             text = yaml.safe_dump(
                 data, sort_keys=False, default_flow_style=False, allow_unicode=True
             )

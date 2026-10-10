@@ -140,6 +140,20 @@ def test_post_preserves_env_refs(web_base: str, tmp_path: Path) -> None:
     assert "$M" in written
 
 
+def test_post_preserves_webhooks(web_base: str, tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "agents:\n  - name: a\n    model: m\n"
+        "webhooks:\n  - path: /hooks/x\n    agent: a\n",
+        encoding="utf-8",
+    )
+    payload = {"agents": [{"name": "a", "provider": "local", "model": "m", "tools": None}]}
+    status, _ = _post(web_base + "/api/config", payload)
+    assert status == 200
+    written = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "webhooks:" in written
+    assert "/hooks/x" in written
+
+
 def test_post_rejects_invalid_json(web_base: str, tmp_path: Path) -> None:
     status, data = _post(web_base + "/api/config", "{not json")
     assert status == 400

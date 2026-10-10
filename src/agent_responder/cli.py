@@ -3,6 +3,7 @@
 ``agent chat "prompt"`` runs a single turn; ``agent chat`` (no prompt) drops into
 an interactive REPL. ``agent tools`` lists the registered tools.
 ``agent web`` serves a small web UI for viewing and editing the config file.
+``agent webhooks`` serves the configured webhook listeners.
 
 The commands are synchronous Typer commands that drive the async agent via
 ``asyncio.run`` -- this keeps the entrypoint portable across Typer versions.
@@ -22,6 +23,7 @@ from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
 from .web import serve_config
+from .webhooks import DEFAULT_HOST, DEFAULT_PORT, serve_webhooks
 
 app = typer.Typer(help="Agentic responder scaffold.")
 console = Console()
@@ -97,6 +99,15 @@ def web(
 ) -> None:
     """Serve a web UI for viewing and editing the config file."""
     serve_config(host=host, port=port)
+
+
+@app.command()
+def webhooks(
+    host: Annotated[str, typer.Option("--host", help="Bind host.")] = DEFAULT_HOST,
+    port: Annotated[int, typer.Option("--port", help="Bind port.")] = DEFAULT_PORT,
+) -> None:
+    """Serve the configured webhook listeners (the ``webhooks:`` section)."""
+    serve_webhooks(Config.load(), host=host, port=port)
 
 
 async def _run_agent(agent: Agent, prompt: str) -> None:

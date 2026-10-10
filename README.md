@@ -21,6 +21,7 @@ uv run agent tools         # list the built-in example tools
 uv run agent chat "What is 2 + 3?"
 uv run agent chat          # interactive REPL
 uv run agent web             # edit the config in a local web UI
+uv run agent webhooks          # serve the configured webhook listeners
 ```
 
 Run the checks:
@@ -73,6 +74,9 @@ The file is sectioned:
   on first run and becomes the system prompt for any agent that references it.
 - `interaction:` — names which agent each interaction uses; `chat.agent` is
   the agent the `agent chat` loop runs.
+- `webhooks:` — names HTTP paths that trigger a specific agent. Each entry has a
+  `path`, an `agent` (a name under `agents:`), and an optional `secret` that,
+  when set, requires `Authorization: Bearer <secret>`. Served by `agent webhooks`.
 
 `Config.active_agent()` resolves the agent the loop uses (the one named by
 `interaction.chat.agent`, else the first agent, else a default), and
@@ -99,6 +103,21 @@ interaction (which agent the chat loop uses) are edited via form fields. Edits
 write back to `config.yaml` (env refs like `$NAME` / `${NAME}` are preserved),
 and on-disk changes are reflected automatically. A running `agent chat` session
 is unaffected -- changes apply to the next session.
+
+## Webhook listeners
+
+`agent webhooks` serves the webhooks named in the `webhooks:` config section on a
+local HTTP server (no extra dependencies; binds to `127.0.0.1:8787` by default).
+Each POST to a configured `path` runs that webhook's `agent` with the parsed
+request body (JSON is re-serialized; non-JSON is passed through as text) and
+returns the agent's answer. A webhook with a `secret` requires the request to
+carry `Authorization: Bearer <secret>`; others are unauthenticated.
+
+```sh
+uv run agent webhooks                # http://127.0.0.1:8787/
+uv run agent webhooks --port 9001    # custom port
+uv run agent webhooks --host 0.0.0.0 # expose beyond localhost
+```
 
 ## Extending it
 

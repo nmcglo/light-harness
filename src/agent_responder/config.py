@@ -217,6 +217,39 @@ def _parse_interaction(raw: Any) -> Interaction:
         return Interaction()
 
 
+def _parse_webhooks(raw: Any) -> list[WebhookConfig]:
+    """Parse the ``webhooks:`` section. Each entry needs a ``path`` (a string
+    starting with ``/``); ``agent`` names the handling agent and ``secret``
+    (optional) requires ``Authorization: Bearer <secret>``. Malformed or
+    duplicate-path entries are dropped."""
+    if not isinstance(raw, list):
+        return []
+    webhooks: list[WebhookConfig] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        normalized = dict(entry)
+        secret = normalized.get("secret")
+        if secret is not None and not isinstance(secret, str):
+            if isinstance(secret, (int, float)):
+                normalized["secret"] = str(secret)
+            else:
+                continue
+        try:
+            webhook = WebhookConfig.model_validate(normalized)
+        except ValidationError:
+            continue
+        if webhook.path in seen:
+            continue
+        seen.add(webhook.path)
+        webhooks.append(webhook)
+    return webhooks
+
+
 class Provider(BaseModel):
     """A model endpoint: connection settings plus the models it offers."""
 
@@ -262,6 +295,19 @@ class Interaction(BaseModel):
     chat: InteractionChat = Field(default_factory=InteractionChat)
 
 
+class WebhookConfig(BaseModel):
+    """A configured webhook: an HTTP ``path`` that triggers a specific ``agent``.
+
+    When ``secret`` is set, requests must carry ``Authorization: Bearer <secret>``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    agent: str = DEFAULT_AGENT_NAME
+    secret: str | None = None
+
+
 class Settings(BaseModel):
     """The effective endpoint the agent loop talks to."""
 
@@ -285,7 +331,7 @@ class Settings(BaseModel):
 
 class Config:
     """Top-level configuration: ``providers``, named ``agents``, ``personas``,
-    and ``interaction`` (which agent each interaction uses).
+    ``interaction`` (which agent each interaction uses), and ``webhooks``.
 
     ``endpoint()`` resolves the effective :class:`Settings` for the loop;
     ``active_agent()`` picks the agent the ``chat`` loop uses; and
@@ -298,11 +344,13 @@ class Config:
         agents: list[AgentConfig],
         personas: dict[str, dict[str, str]],
         interaction: Interaction,
+        webhooks: list[WebhookConfig],
     ) -> None:
         self.providers = providers
         self.agents = agents
         self.personas = personas
         self.interaction = interaction
+        self.webhooks = webhooks
 
     @classmethod
     def load(cls) -> Config:
@@ -311,6 +359,7 @@ class Config:
         agents = _parse_agents(raw.get("agents"))
         personas = _parse_personas(raw.get("personas"))
         interaction = _parse_interaction(raw.get("interaction"))
+        webhooks = _parse_webhooks(raw.get("webhooks"))
         for name, files in personas.items():
             if _valid_persona_name(name):
                 ensure_persona(name, files.get(SOUL_FILENAME, ""))
@@ -319,6 +368,7 @@ class Config:
             agents=agents,
             personas=personas,
             interaction=interaction,
+            webhooks=webhooks,
         )
 
     def active_agent(self) -> AgentConfig:
@@ -332,9 +382,19 @@ class Config:
             return self.agents[0]
         return AgentConfig()
 
+    def get_agent(self, name: str) -> AgentConfig | None:
+        """The named agent, or ``None`` if no agent has that name."""
+        for agent in self.agents:
+            if agent.name == name:
+                return agent
+        return None
+
     def endpoint(self) -> Settings:
-        """Resolve the effective endpoint: env > active agent/provider > default."""
-        agent = self.active_agent()
+        """Resolve the effective endpoint for the active (chat) agent."""
+        return self.endpoint_for(self.active_agent())
+
+    def endpoint_for(self, agent: AgentConfig) -> Settings:
+        """Resolve the effective endpoint for ``agent``: env > agent/provider > default."""
         provider_name = _env_value("provider") or agent.provider
         provider = self.providers.get(provider_name) or Provider()
         file_values = {
@@ -344,6 +404,13 @@ class Config:
             "timeout": provider.timeout,
         }
         return Settings.from_sources(file_values)
+
+    def webhook_by_path(self, path: str) -> WebhookConfig | None:
+        """The webhook whose ``path`` matches, or ``None``."""
+        for webhook in self.webhooks:
+            if webhook.path == path:
+                return webhook
+        return None
 
     def system_prompt_for(self, agent: AgentConfig) -> str:
         """The system prompt for ``agent``: its persona's stored ``SOUL.md``
