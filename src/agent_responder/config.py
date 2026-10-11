@@ -223,6 +223,49 @@ def _first_error(exc: ValidationError) -> str:
     return f"{loc}: {err['msg']}" if loc else str(err["msg"])
 
 
+def _workspace_problem(raw: str) -> tuple[str | None, Path | None]:
+    """``(problem, resolved)`` for a configured workspace: a human-readable reason
+    it can't be used, or the resolved directory when it can."""
+    if not raw.strip():
+        return "is empty", None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        return "must be an absolute path", None
+    if not path.is_dir():
+        return "is not an existing directory", None
+    resolved = path.resolve()
+    home = config_home().resolve()
+    if resolved.is_relative_to(home) or home.is_relative_to(resolved):
+        # The harness home holds config.yaml (API keys, webhook secrets) and logs.
+        return f"must not contain or sit inside the harness home ({home})", None
+    return None, resolved
+
+
+def _check_workspace(agent: AgentConfig, where: str, warnings: list[str]) -> AgentConfig:
+    """Validate ``agent.workspace`` (failing closed: a bad one is dropped, which
+    disables the file tools) and flag file tools requested without a workspace."""
+    from .tools.builtin import FILE_TOOL_NAMES  # lazy: tools imports this module
+
+    if agent.workspace is not None:
+        problem, resolved = _workspace_problem(agent.workspace)
+        if resolved is None:
+            warnings.append(
+                f"{where} ({agent.name}): workspace {agent.workspace!r} {problem}; "
+                "file tools disabled"
+            )
+            agent = agent.model_copy(update={"workspace": None})
+        else:
+            agent = agent.model_copy(update={"workspace": str(resolved)})
+    if agent.workspace is None:
+        wanted = [t for t in agent.tools or [] if t in FILE_TOOL_NAMES]
+        if wanted:
+            warnings.append(
+                f"{where} ({agent.name}): {', '.join(wanted)} need a 'workspace' and "
+                "will be unavailable"
+            )
+    return agent
+
+
 def _parse_agents(raw: Any, warnings: list[str]) -> list[AgentConfig]:
     """Parse the ``agents:`` section. Entries without a usable ``name`` are
     skipped; duplicates and malformed entries are dropped (and reported)."""
@@ -247,6 +290,7 @@ def _parse_agents(raw: Any, warnings: list[str]) -> list[AgentConfig]:
         except ValidationError as exc:
             warnings.append(f"{where} ({name}): {_first_error(exc)}; entry ignored")
             continue
+        agent = _check_workspace(agent, where, warnings)
         if agent.name in seen:
             warnings.append(f"{where}: duplicate agent name '{agent.name}'; entry ignored")
             continue
@@ -368,6 +412,14 @@ class AgentConfig(BaseModel):
     # Optional persona (a name in ``personas:``) that customizes this agent,
     # e.g. via its ``SOUL.md`` (used as the system prompt).
     persona: str | None = None
+
+    # Optional absolute directory the file tools (read_file/write_file/edit_file)
+    # are confined to. Without it those tools are unavailable to this agent.
+    workspace: str | None = None
+
+    def workspace_path(self) -> Path | None:
+        """The validated workspace directory, or ``None`` when file tools are off."""
+        return Path(self.workspace) if self.workspace else None
 
 
 class InteractionChat(BaseModel):

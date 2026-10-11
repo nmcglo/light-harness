@@ -33,7 +33,7 @@ import yaml
 
 from .config import config_file_path, load_yaml
 from .httputil import BodyError, read_body
-from .tools import builtin_tools
+from .tools.builtin import BUILTIN_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -322,6 +322,8 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     h.push('<label><span>Persona</span><select class="agent-persona">' +
       personaOptions(a.persona || "") + "</select></label>");
     h.push("</div>");
+    h.push(field("Workspace (absolute directory; required for the file tools)",
+      "agent-workspace", a.workspace || "", "/path/to/project"));
     h.push(toolsBlock(a.tools));
     h.push("</div>");
     return h.join("");
@@ -428,6 +430,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
         provider: (card.querySelector(".agent-provider") || {}).value || "",
         model: (card.querySelector(".agent-model") || {}).value.trim(),
         persona: (card.querySelector(".agent-persona") || {}).value || "",
+        workspace: ((card.querySelector(".agent-workspace") || {}).value || "").trim(),
         tools: tools
       };
     });
@@ -664,6 +667,9 @@ def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict
             persona = str(a.get("persona") or "").strip()
             if persona:
                 agent_entry["persona"] = persona
+            workspace = str(a.get("workspace") or "").strip()
+            if workspace:
+                agent_entry["workspace"] = workspace
             agents.append(agent_entry)
     if agents:
         data["agents"] = agents
@@ -839,7 +845,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"exists": False, "path": str(path), "text": None, "data": {}})
 
     def _handle_get_tools(self) -> None:
-        self._send_json(200, {"tools": [t.name for t in builtin_tools()]})
+        self._send_json(200, {"tools": list(BUILTIN_TOOL_NAMES)})
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")

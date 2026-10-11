@@ -83,7 +83,7 @@ def default_agent_factory(
     a persona session log under the agent's persona home). The webhook's own
     ``system_prompt`` (when set) overrides the agent's persona-based prompt."""
     settings = config.endpoint_for(agent_cfg)
-    registry = build_tool_registry(agent_cfg.tools)
+    registry = build_tool_registry(agent_cfg.tools, agent_cfg.workspace_path())
     system_prompt = webhook.system_prompt or config.system_prompt_for(agent_cfg)
     persona_name = agent_cfg.persona or agent_cfg.name
     ensure_persona(persona_name)

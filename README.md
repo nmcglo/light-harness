@@ -73,8 +73,17 @@ The file is sectioned:
 - `providers:` — named endpoints. Each has `base_url`, `api_key`, `timeout`,
   and a `models` list (the models you can switch among).
 - `agents:` — a list of named agents. Each picks a `provider` and `model`,
-  plus an optional `tools` list (opt-in: omit for all built-in tools, `[]` for
-  none, or name a subset) and an optional `persona` (a key into `personas:`).
+  plus an optional `tools` list (opt-in: omit for every available built-in tool,
+  `[]` for none, or name a subset), an optional `workspace`, and an optional
+  `persona` (a key into `personas:`). The file tools (`read_file`, `write_file`,
+  `edit_file`) are only available to an agent with a `workspace`: an absolute
+  directory they are confined to. `../` traversal, absolute paths outside it, and
+  symlinks pointing out of it are refused, and a workspace that contains (or sits
+  inside) `AGENT_RESPONDER_HOME` is rejected because that holds `config.yaml` with
+  your keys. A bad workspace disables the file tools and prints a `Config warning`.
+  Writes are atomic and files over 10 MB are refused. Anything *inside* the
+  workspace is still fair game, so keep it narrow and prefer `tools: [read_file]`
+  for agents that don't need to write.
 - `personas:` — names a persona. Each named persona gets a directory under
   `AGENT_RESPONDER_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
   `sessions/` directory of conversation logs. The `SOUL.md` value seeds that file

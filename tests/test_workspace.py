@@ -1,0 +1,153 @@
+"""The file tools must stay inside their workspace (and out of the harness home)."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import stat
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from agent_responder.config import Config
+from agent_responder.tools import build_tool_registry
+
+
+@pytest.fixture()
+def dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    """(workspace, outside, harness home) as sibling directories."""
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    home = tmp_path / "home"
+    for d in (workspace, outside, home):
+        d.mkdir()
+    (outside / "secret.txt").write_text("top secret\n")
+    (home / "config.yaml").write_text("api_key: sk-123\n")
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(home))
+    return workspace, outside, home
+
+
+def _run(workspace: Path, tool: str, **args: object) -> str:
+    registry = build_tool_registry(None, workspace)
+    return asyncio.run(registry.run(tool, dict(args)))
+
+
+def test_reads_and_writes_inside_workspace(dirs: tuple[Path, Path, Path]) -> None:
+    ws, _, _ = dirs
+    assert _run(ws, "write_file", path="notes/a.txt", content="hello\n").startswith("Wrote")
+    assert (ws / "notes" / "a.txt").read_text() == "hello\n"
+    assert _run(ws, "read_file", path="notes/a.txt") == "hello\n"
+    assert "Successfully replaced" in _run(
+        ws, "edit_file", path="notes/a.txt", old_text="hello", new_text="bye"
+    )
+    assert (ws / "notes" / "a.txt").read_text() == "bye\n"
+    # An absolute path that points inside the workspace is fine.
+    assert _run(ws, "read_file", path=str(ws / "notes" / "a.txt")) == "bye\n"
+
+
+@pytest.mark.parametrize("bad", ["../outside/secret.txt", "notes/../../outside/secret.txt"])
+def test_dotdot_traversal_is_refused(dirs: tuple[Path, Path, Path], bad: str) -> None:
+    ws, outside, _ = dirs
+    assert "outside the workspace" in _run(ws, "read_file", path=bad)
+    assert "outside the workspace" in _run(ws, "write_file", path=bad + ".new", content="x")
+    assert "outside the workspace" in _run(
+        ws, "edit_file", path=bad, old_text="top", new_text="pwned"
+    )
+    assert (outside / "secret.txt").read_text() == "top secret\n"
+    assert not (outside / "secret.txt.new").exists()
+
+
+def test_absolute_path_outside_is_refused(dirs: tuple[Path, Path, Path]) -> None:
+    ws, outside, _ = dirs
+    target = str(outside / "secret.txt")
+    assert "outside the workspace" in _run(ws, "read_file", path=target)
+    assert "outside the workspace" in _run(ws, "write_file", path=target, content="x")
+    assert (outside / "secret.txt").read_text() == "top secret\n"
+
+
+def test_symlinks_cannot_escape_but_internal_ones_work(dirs: tuple[Path, Path, Path]) -> None:
+    ws, outside, _ = dirs
+    (ws / "real.txt").write_text("inside\n")
+    (ws / "link_in.txt").symlink_to(ws / "real.txt")
+    (ws / "link_out.txt").symlink_to(outside / "secret.txt")
+    (ws / "dir_out").symlink_to(outside, target_is_directory=True)
+
+    assert _run(ws, "read_file", path="link_in.txt") == "inside\n"
+    assert "outside the workspace" in _run(ws, "read_file", path="link_out.txt")
+    assert "outside the workspace" in _run(ws, "read_file", path="dir_out/secret.txt")
+    # Writing through an escaping symlinked directory must not create files outside.
+    assert "outside the workspace" in _run(ws, "write_file", path="dir_out/new.txt", content="x")
+    assert "outside the workspace" in _run(
+        ws, "edit_file", path="link_out.txt", old_text="top", new_text="pwned"
+    )
+    assert not (outside / "new.txt").exists()
+    assert (outside / "secret.txt").read_text() == "top secret\n"
+
+
+def test_harness_home_is_off_limits_even_via_symlink(dirs: tuple[Path, Path, Path]) -> None:
+    ws, _, home = dirs
+    # Workspace validation rejects roots containing the home, but a symlink inside a
+    # valid workspace could still point at it; the tools must refuse that too.
+    (ws / "cfg").symlink_to(home, target_is_directory=True)
+    assert "outside the workspace" in _run(ws, "read_file", path="cfg/config.yaml")
+    nested = home / "workspace"
+    nested.mkdir()
+    (nested / "x.txt").write_text("x")
+    # A workspace *inside* the home is denied by the tool layer as well.
+    assert "not accessible" in _run(nested, "read_file", path="x.txt")
+
+
+def test_write_is_atomic_and_keeps_mode(dirs: tuple[Path, Path, Path]) -> None:
+    ws, _, _ = dirs
+    script = ws / "run.sh"
+    script.write_text("old\n")
+    script.chmod(0o750)
+    _run(ws, "write_file", path="run.sh", content="new\n")
+    assert script.read_text() == "new\n"
+    assert stat.S_IMODE(script.stat().st_mode) == 0o750
+    assert [p.name for p in ws.iterdir()] == ["run.sh"]  # no stray temp files
+
+
+def test_oversized_files_are_refused(dirs: tuple[Path, Path, Path]) -> None:
+    ws, _, _ = dirs
+    big = ws / "big.txt"
+    with big.open("wb") as fh:
+        fh.truncate(11 * 1024 * 1024)  # sparse; not actually written
+    assert "too large" in _run(ws, "read_file", path="big.txt")
+    assert "exceeds" in _run(ws, "write_file", path="x.txt", content="a" * (11 * 1024 * 1024))
+
+
+def test_config_fails_closed_on_bad_workspace(
+    dirs: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    ws, _, home = dirs
+    (home / "config.yaml").write_text(
+        textwrap.dedent(
+            f"""
+            agents:
+              - {{name: good, workspace: {ws}, tools: [read_file]}}
+              - {{name: relative, workspace: some/dir}}
+              - {{name: missing, workspace: {tmp_path}/nope}}
+              - {{name: wide, workspace: {tmp_path}}}
+              - {{name: inside, workspace: {home}}}
+              - {{name: nows, tools: [read_file, echo]}}
+            """
+        )
+    )
+    config = Config.load()
+    by_name = {a.name: a for a in config.agents}
+    assert by_name["good"].workspace == str(ws.resolve())
+    for bad in ("relative", "missing", "wide", "inside"):
+        assert by_name[bad].workspace is None, bad
+    joined = "\n".join(config.warnings)
+    assert "absolute" in joined and "existing directory" in joined
+    assert "harness home" in joined
+    assert "read_file need a 'workspace'" in joined
+    # A dropped workspace means no file tools, even with tools unset.
+    assert not set(build_tool_registry(None, by_name["wide"].workspace_path()).names()) & {
+        "read_file",
+        "write_file",
+        "edit_file",
+    }
+    assert os.fspath(by_name["good"].workspace_path() or "") == str(ws.resolve())

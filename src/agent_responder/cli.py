@@ -101,7 +101,7 @@ def chat(
         )
         raise typer.Exit(code=1)
 
-    registry = build_tool_registry(active.tools)
+    registry = build_tool_registry(active.tools, active.workspace_path())
     system_prompt = config.system_prompt_for(active)
     persona_name = active.persona or active.name
     try:
@@ -123,7 +123,8 @@ def chat(
 @app.command()
 def tools() -> None:
     """List the tools the agent will use (per the current config)."""
-    registry = build_tool_registry(_load_config().active_agent().tools)
+    active = _load_config().active_agent()
+    registry = build_tool_registry(active.tools, active.workspace_path())
     for spec in registry.tool_schemas():
         fn = spec["function"]
         console.print(f"[bold]{fn['name']}[/bold] -- {fn['description']}")
