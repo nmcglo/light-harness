@@ -25,6 +25,7 @@ from agent_responder.webhooks import (
     _bearer_matches,
     create_webhook_server,
     parse_webhook_body,
+    unauthenticated_warning,
 )
 
 _ALL_VARS = (
@@ -164,6 +165,29 @@ def test_bearer_matches_rules() -> None:
     assert _bearer_matches("s3cret", None) is False
     assert _bearer_matches("s3cret", "Basic abc") is False
     assert _bearer_matches("s3cret", "s3cret") is False  # no Bearer scheme
+
+
+def _config_with(*hooks: WebhookConfig) -> Config:
+    from agent_responder.config import Interaction
+
+    return Config({}, [], {}, Interaction(), list(hooks))
+
+
+def test_unauthenticated_warning_counts_open_webhooks() -> None:
+    config = _config_with(
+        WebhookConfig(path="/a", secret="s"),
+        WebhookConfig(path="/b"),
+        WebhookConfig(path="/c", secret=""),
+    )
+    warning = unauthenticated_warning(config)
+    assert warning is not None
+    assert "2 of 3" in warning
+    assert "/b" in warning and "/c" in warning and "/a" not in warning
+
+
+def test_no_warning_when_all_webhooks_authenticated() -> None:
+    assert unauthenticated_warning(_config_with(WebhookConfig(path="/a", secret="s"))) is None
+    assert unauthenticated_warning(_config_with()) is None
 
 
 def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
