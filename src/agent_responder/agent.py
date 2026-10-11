@@ -57,7 +57,10 @@ class Agent:
                     )
                 )
                 for call in response.tool_calls:
-                    result = await self.tools.run(call.name, call.arguments)
+                    if call.error is not None:
+                        result = f"Error: invalid arguments for '{call.name}': {call.error}."
+                    else:
+                        result = await self.tools.run(call.name, call.arguments)
                     self._remember(
                         ChatMessage(role="tool", tool_call_id=call.id, content=result)
                     )
