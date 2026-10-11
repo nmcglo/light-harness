@@ -7,6 +7,7 @@ in a different provider (or a fake for tests) without touching the loop.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Protocol
 
@@ -22,6 +23,9 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # Set when the model's raw arguments could not be decoded; the call is not run
+    # and this message is returned to the model as the tool result instead.
+    error: str | None = None
 
 
 class ChatMessage(BaseModel):
@@ -85,11 +89,41 @@ def _to_wire(message: ChatMessage) -> dict[str, Any]:
     return {"role": message.role, "content": message.content}
 
 
+_MAX_ATTEMPTS = 3
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _parse_tool_arguments(raw: Any) -> tuple[dict[str, Any], str | None]:
+    """Decode a tool call's arguments into ``(arguments, error)``.
+
+    Models sometimes emit malformed JSON; that must reach the model as a tool error
+    (so it can retry) rather than crash the run, so a failure yields ``({}, message)``.
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            return {}, f"arguments are not valid JSON ({exc})"
+    if raw is None:
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, f"arguments must be a JSON object, got {type(raw).__name__}"
+    return raw, None
+
+
 class OpenAICompatibleClient:
     """Default client: posts to ``{base_url}/chat/completions``."""
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        retry_delay: float = 0.5,
+    ) -> None:
         self._settings = settings
+        self._retry_delay = retry_delay
         self._client = client or httpx.AsyncClient(
             base_url=settings.base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {settings.api_key}"},
@@ -100,6 +134,23 @@ class OpenAICompatibleClient:
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    async def _post_with_retry(self, payload: dict[str, Any]) -> httpx.Response:
+        """POST the chat request, retrying transient failures (connection errors,
+        429 and 5xx) with exponential backoff; other HTTP errors raise at once."""
+        for attempt in range(_MAX_ATTEMPTS):
+            last = attempt == _MAX_ATTEMPTS - 1
+            try:
+                response = await self._client.post("/chat/completions", json=payload)
+            except httpx.TransportError:
+                if last:
+                    raise
+            else:
+                if response.status_code not in _RETRY_STATUSES or last:
+                    response.raise_for_status()
+                    return response
+            await asyncio.sleep(self._retry_delay * 2**attempt)
+        raise AssertionError("unreachable")  # pragma: no cover - loop always returns/raises
 
     async def chat(
         self,
@@ -114,17 +165,19 @@ class OpenAICompatibleClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        response = await self._client.post("/chat/completions", json=payload)
-        response.raise_for_status()
+        response = await self._post_with_retry(payload)
         choice = response.json()["choices"][0]["message"]
 
         tool_calls: list[ToolCall] = []
         for raw in choice.get("tool_calls") or []:
-            args = raw["function"]["arguments"]
-            if isinstance(args, str):
-                args = json.loads(args) if args.strip() else {}
+            args, error = _parse_tool_arguments(raw["function"]["arguments"])
             tool_calls.append(
-                ToolCall(id=raw["id"], name=raw["function"]["name"], arguments=args or {})
+                ToolCall(
+                    id=raw["id"],
+                    name=raw["function"]["name"],
+                    arguments=args,
+                    error=error,
+                )
             )
 
         return LLMResponse(
