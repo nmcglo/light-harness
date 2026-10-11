@@ -16,9 +16,17 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from .agent import Agent
-from .config import Config, Settings, ensure_persona, persona_sessions_dir
+from .config import (
+    Config,
+    ConfigError,
+    Settings,
+    ensure_persona,
+    load_dotenv,
+    persona_sessions_dir,
+)
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
@@ -27,6 +35,30 @@ from .webhooks import DEFAULT_HOST, DEFAULT_PORT, serve_webhooks
 
 app = typer.Typer(help="Agentic responder scaffold.")
 console = Console()
+err_console = Console(stderr=True)
+
+
+@app.callback()
+def _main() -> None:
+    """Load ``./.env`` (without overriding variables already set) before any command."""
+    try:
+        load_dotenv()
+    except ConfigError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+
+def _load_config() -> Config:
+    """Load the config; exit with a clear error if the file is broken, and print a
+    warning for each entry that was ignored."""
+    try:
+        config = Config.load()
+    except ConfigError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    for warning in config.warnings:
+        err_console.print(f"[yellow]Config warning:[/yellow] {escape(warning)}", highlight=False)
+    return config
 
 
 def _build_agent(
@@ -55,7 +87,7 @@ def chat(
     ] = None,
 ) -> None:
     """Run a single prompt, or drop into an interactive REPL."""
-    config = Config.load()
+    config = _load_config()
     active = config.active_agent()
     settings = config.endpoint()
     if model:
@@ -71,7 +103,11 @@ def chat(
     registry = build_tool_registry(active.tools)
     system_prompt = config.system_prompt_for(active)
     persona_name = active.persona or active.name
-    ensure_persona(persona_name)
+    try:
+        ensure_persona(persona_name)
+    except ValueError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
     session = SessionLog(
         persona_sessions_dir(persona_name),
         meta={"persona": persona_name, "agent": active.name, "model": settings.model},
@@ -86,7 +122,7 @@ def chat(
 @app.command()
 def tools() -> None:
     """List the tools the agent will use (per the current config)."""
-    registry = build_tool_registry(Config.load().active_agent().tools)
+    registry = build_tool_registry(_load_config().active_agent().tools)
     for spec in registry.tool_schemas():
         fn = spec["function"]
         console.print(f"[bold]{fn['name']}[/bold] -- {fn['description']}")
@@ -107,7 +143,7 @@ def webhooks(
     port: Annotated[int, typer.Option("--port", help="Bind port.")] = DEFAULT_PORT,
 ) -> None:
     """Serve the configured webhook listeners (the ``webhooks:`` section)."""
-    serve_webhooks(Config.load(), host=host, port=port)
+    serve_webhooks(_load_config(), host=host, port=port)
 
 
 async def _run_agent(agent: Agent, prompt: str) -> None:

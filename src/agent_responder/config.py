@@ -64,7 +64,13 @@ def personas_home() -> Path:
 
 
 def persona_dir(name: str) -> Path:
-    """The directory for a single named persona."""
+    """The directory for a single named persona.
+
+    Raises :class:`ValueError` unless ``name`` is a safe single path segment, so
+    every persona path helper (and :func:`ensure_persona`) is traversal-safe.
+    """
+    if not _valid_persona_name(name):
+        raise ValueError(f"invalid persona name {name!r}: must be a single path segment")
     return personas_home() / name
 
 
@@ -105,15 +111,63 @@ def ensure_persona(name: str, seed: str = "") -> Path:
     return directory
 
 
+def load_dotenv(path: Path | None = None) -> list[str]:
+    """Load ``KEY=VALUE`` lines from a ``.env`` file (default ``./.env``) into the
+    environment. Variables already set in the environment win. Supports ``#``
+    comments, blank lines, an optional ``export`` prefix, and single/double-quoted
+    values. Returns the names that were set. A missing file is not an error."""
+    env_path = path if path is not None else Path(".env")
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{env_path}: cannot read env file: {exc}") from exc
+    applied: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        if key not in os.environ:
+            os.environ[key] = value
+            applied.append(key)
+    return applied
+
+
+class ConfigError(ValueError):
+    """The config file exists but cannot be used (unreadable, invalid YAML, wrong shape)."""
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
-    """Parse the YAML config file. Returns ``{}`` if missing, empty, or invalid."""
+    """Parse the YAML config file.
+
+    Returns ``{}`` if the file is missing or empty. Raises :class:`ConfigError`
+    if it is unreadable, is not valid YAML, or its top level is not a mapping --
+    silently treating a broken file as empty would drop agents and webhook
+    secrets without telling anyone.
+    """
     if not path.is_file():
         return {}
     try:
-        data = yaml.safe_load(path.read_text())
-    except yaml.YAMLError:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{path}: cannot parse config file: {exc}") from exc
+    if data is None:
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path}: top level must be a mapping, got {type(data).__name__}")
+    return data
 
 
 _ENV_VAR_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
@@ -153,51 +207,75 @@ def _env_value(field: str) -> str | None:
     return value if value else None
 
 
-def _parse_providers(raw: Any) -> dict[str, Provider]:
-    """Parse the ``providers:`` section. Malformed entries are skipped."""
+def _parse_providers(raw: Any, warnings: list[str]) -> dict[str, Provider]:
+    """Parse the ``providers:`` section. Malformed entries are skipped (and reported)."""
+    if raw is None:
+        return {}
     if not isinstance(raw, dict):
+        warnings.append("providers: expected a mapping; section ignored")
         return {}
     providers: dict[str, Provider] = {}
     for name, spec in raw.items():
-        if isinstance(spec, dict):
-            try:
-                providers[str(name)] = Provider.model_validate(spec)
-            except ValidationError:
-                continue
+        if not isinstance(spec, dict):
+            warnings.append(f"providers.{name}: expected a mapping; entry ignored")
+            continue
+        try:
+            providers[str(name)] = Provider.model_validate(spec)
+        except ValidationError as exc:
+            warnings.append(f"providers.{name}: {_first_error(exc)}; entry ignored")
     return providers
 
 
-def _parse_agents(raw: Any) -> list[AgentConfig]:
+def _first_error(exc: ValidationError) -> str:
+    """A short ``field: message`` summary of the first validation error."""
+    err = exc.errors()[0]
+    loc = ".".join(str(part) for part in err["loc"])
+    return f"{loc}: {err['msg']}" if loc else str(err["msg"])
+
+
+def _parse_agents(raw: Any, warnings: list[str]) -> list[AgentConfig]:
     """Parse the ``agents:`` section. Entries without a usable ``name`` are
-    skipped; duplicates and malformed entries are dropped."""
+    skipped; duplicates and malformed entries are dropped (and reported)."""
+    if raw is None:
+        return []
     if not isinstance(raw, list):
+        warnings.append("agents: expected a list; section ignored")
         return []
     agents: list[AgentConfig] = []
     seen: set[str] = set()
-    for entry in raw:
+    for index, entry in enumerate(raw):
+        where = f"agents[{index}]"
         if not isinstance(entry, dict):
+            warnings.append(f"{where}: expected a mapping; entry ignored")
             continue
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
+            warnings.append(f"{where}: missing or empty 'name'; entry ignored")
             continue
         try:
             agent = AgentConfig.model_validate(entry)
-        except ValidationError:
+        except ValidationError as exc:
+            warnings.append(f"{where} ({name}): {_first_error(exc)}; entry ignored")
             continue
         if agent.name in seen:
+            warnings.append(f"{where}: duplicate agent name '{agent.name}'; entry ignored")
             continue
         seen.add(agent.name)
         agents.append(agent)
     return agents
 
 
-def _parse_personas(raw: Any) -> dict[str, dict[str, str]]:
+def _parse_personas(raw: Any, warnings: list[str]) -> dict[str, dict[str, str]]:
     """Parse the ``personas:`` section: name -> {file: content} (strings only)."""
+    if raw is None:
+        return {}
     if not isinstance(raw, dict):
+        warnings.append("personas: expected a mapping; section ignored")
         return {}
     personas: dict[str, dict[str, str]] = {}
     for name, content in raw.items():
         if not isinstance(content, dict):
+            warnings.append(f"personas.{name}: expected a mapping; entry ignored")
             continue
         personas[str(name)] = {
             str(key): str(value)
@@ -207,31 +285,41 @@ def _parse_personas(raw: Any) -> dict[str, dict[str, str]]:
     return personas
 
 
-def _parse_interaction(raw: Any) -> Interaction:
+def _parse_interaction(raw: Any, warnings: list[str]) -> Interaction:
     """Parse the ``interaction:`` section, falling back to defaults."""
+    if raw is None:
+        return Interaction()
     if not isinstance(raw, dict):
+        warnings.append("interaction: expected a mapping; section ignored")
         return Interaction()
     try:
         return Interaction.model_validate(raw)
-    except ValidationError:
+    except ValidationError as exc:
+        warnings.append(f"interaction: {_first_error(exc)}; section ignored")
         return Interaction()
 
 
-def _parse_webhooks(raw: Any) -> list[WebhookConfig]:
+def _parse_webhooks(raw: Any, warnings: list[str]) -> list[WebhookConfig]:
     """Parse the ``webhooks:`` section. Each entry needs a ``path`` (a string
     starting with ``/``); ``agent`` names the handling agent, ``secret``
     (optional) requires ``Authorization: Bearer <secret>``, and ``system_prompt``
     (optional) overrides the agent's default system prompt. Malformed or
-    duplicate-path entries are dropped."""
+    duplicate-path entries are dropped (and reported)."""
+    if raw is None:
+        return []
     if not isinstance(raw, list):
+        warnings.append("webhooks: expected a list; section ignored")
         return []
     webhooks: list[WebhookConfig] = []
     seen: set[str] = set()
-    for entry in raw:
+    for index, entry in enumerate(raw):
+        where = f"webhooks[{index}]"
         if not isinstance(entry, dict):
+            warnings.append(f"{where}: expected a mapping; entry ignored")
             continue
         path = entry.get("path")
         if not isinstance(path, str) or not path.startswith("/"):
+            warnings.append(f"{where}: 'path' must be a string starting with '/'; entry ignored")
             continue
         normalized = dict(entry)
         secret = normalized.get("secret")
@@ -239,18 +327,24 @@ def _parse_webhooks(raw: Any) -> list[WebhookConfig]:
             if isinstance(secret, (int, float)):
                 normalized["secret"] = str(secret)
             else:
+                warnings.append(f"{where} ({path}): 'secret' must be a string; entry ignored")
                 continue
         system_prompt = normalized.get("system_prompt")
         if system_prompt is not None:
             if not isinstance(system_prompt, str):
+                warnings.append(
+                    f"{where} ({path}): 'system_prompt' must be a string; entry ignored"
+                )
                 continue
             if not system_prompt.strip():
                 normalized["system_prompt"] = None
         try:
             webhook = WebhookConfig.model_validate(normalized)
-        except ValidationError:
+        except ValidationError as exc:
+            warnings.append(f"{where} ({path}): {_first_error(exc)}; entry ignored")
             continue
         if webhook.path in seen:
+            warnings.append(f"{where}: duplicate path '{webhook.path}'; entry ignored")
             continue
         seen.add(webhook.path)
         webhooks.append(webhook)
@@ -355,30 +449,39 @@ class Config:
         personas: dict[str, dict[str, str]],
         interaction: Interaction,
         webhooks: list[WebhookConfig],
+        warnings: list[str] | None = None,
     ) -> None:
         self.providers = providers
         self.agents = agents
         self.personas = personas
         self.interaction = interaction
         self.webhooks = webhooks
+        # Human-readable notes about config entries that were ignored on load.
+        self.warnings = warnings if warnings is not None else []
 
     @classmethod
     def load(cls) -> Config:
+        """Load the config file. Raises :class:`ConfigError` if it cannot be parsed;
+        entries that are individually malformed are dropped and listed in ``warnings``."""
         raw = _resolve_env_in_value(load_yaml(config_file_path()))
-        providers = _parse_providers(raw.get("providers"))
-        agents = _parse_agents(raw.get("agents"))
-        personas = _parse_personas(raw.get("personas"))
-        interaction = _parse_interaction(raw.get("interaction"))
-        webhooks = _parse_webhooks(raw.get("webhooks"))
+        warnings: list[str] = []
+        providers = _parse_providers(raw.get("providers"), warnings)
+        agents = _parse_agents(raw.get("agents"), warnings)
+        personas = _parse_personas(raw.get("personas"), warnings)
+        interaction = _parse_interaction(raw.get("interaction"), warnings)
+        webhooks = _parse_webhooks(raw.get("webhooks"), warnings)
         for name, files in personas.items():
             if _valid_persona_name(name):
                 ensure_persona(name, files.get(SOUL_FILENAME, ""))
+            else:
+                warnings.append(f"personas.{name}: invalid persona name; entry ignored")
         return cls(
             providers=providers,
             agents=agents,
             personas=personas,
             interaction=interaction,
             webhooks=webhooks,
+            warnings=warnings,
         )
 
     def active_agent(self) -> AgentConfig:
