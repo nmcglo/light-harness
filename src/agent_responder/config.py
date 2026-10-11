@@ -54,6 +54,7 @@ def config_file_path() -> Path:
     """Path to the config file inside :func:`config_home`."""
     return config_home() / CONFIG_FILENAME
 
+
 SOUL_FILENAME = "SOUL.md"
 
 
