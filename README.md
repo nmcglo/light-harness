@@ -1,4 +1,4 @@
-# agent-responder
+# light-harness
 
 A lightweight agentic harness for personal use, primarily to act as a
 automated responder to triggers. Obviously more polished harnesses exist
@@ -16,7 +16,7 @@ models.
 ```sh
 uv sync --group dev        # create .venv, install deps, write uv.lock
 cp .env.example .env       # secrets referenced from config.yaml as $NAME; `agent` loads ./.env
-cp config.yaml.example ~/.agent-responder/config.yaml   # then edit
+cp config.yaml.example ~/.light-harness/config.yaml   # then edit
 
 uv run agent tools         # list the built-in example tools
 uv run agent chat "What is 2 + 3?"
@@ -56,9 +56,9 @@ are no per-field environment overrides: each agent resolves its own provider,
 model, base URL and API key, so agents on different providers never share
 credentials. Secrets are pulled from the environment by interpolation (below).
 
-- **Config file**: `$AGENT_RESPONDER_HOME/config.yaml` (default home
-  `$HOME/.agent-responder/config.yaml`). See `config.yaml.example` for a template.
-- **Env var**: `AGENT_RESPONDER_HOME` overrides the config home directory.
+- **Config file**: `$LIGHT_HARNESS_HOME/config.yaml` (default home
+  `$HOME/.light-harness/config.yaml`). See `config.yaml.example` for a template.
+- **Env var**: `LIGHT_HARNESS_HOME` overrides the config home directory.
 - **`.env`**: the CLI loads `./.env` (`KEY=VALUE` lines) at startup. Variables
   already set in the environment win over the file.
 - **Errors**: a config file that is not valid YAML (or whose top level is not a
@@ -82,13 +82,13 @@ The file is sectioned:
   `edit_file`) are only available to an agent with a `workspace`: an absolute
   directory they are confined to. `../` traversal, absolute paths outside it, and
   symlinks pointing out of it are refused, and a workspace that contains (or sits
-  inside) `AGENT_RESPONDER_HOME` is rejected because that holds `config.yaml` with
+  inside) `LIGHT_HARNESS_HOME` is rejected because that holds `config.yaml` with
   your keys. A bad workspace disables the file tools and prints a `Config warning`.
   Writes are atomic and files over 10 MB are refused. Anything *inside* the
   workspace is still fair game, so keep it narrow and prefer `tools: [read_file]`
   for agents that don't need to write.
 - `personas:` — names a persona. Each named persona gets a directory under
-  `AGENT_RESPONDER_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
+  `LIGHT_HARNESS_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
   `sessions/` directory of conversation logs. The `SOUL.md` value seeds that file
   on first run and becomes the system prompt for any agent that references it.
 - `interaction:` — names which agent each interaction uses; `chat.agent` is

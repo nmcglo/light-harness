@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_responder.config import Config
-from agent_responder.tools import build_tool_registry
+from light_harness.config import Config
+from light_harness.tools import build_tool_registry
 
 
 @pytest.fixture()
@@ -23,7 +23,7 @@ def dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, P
         d.mkdir()
     (outside / "secret.txt").write_text("top secret\n")
     (home / "config.yaml").write_text("api_key: sk-123\n")
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(home))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(home))
     return workspace, outside, home
 
 

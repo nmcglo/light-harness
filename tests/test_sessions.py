@@ -7,10 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent_responder.agent import Agent
-from agent_responder.llm import ChatMessage, LLMResponse, ToolCall
-from agent_responder.sessions import SessionLog
-from agent_responder.tools import default_registry
+from light_harness.agent import Agent
+from light_harness.llm import ChatMessage, LLMResponse, ToolCall
+from light_harness.sessions import SessionLog
+from light_harness.tools import default_registry
 
 
 class FakeClient:

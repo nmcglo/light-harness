@@ -1,7 +1,7 @@
 """Configuration: built-in defaults < config.yaml.
 
-The config file lives at ``$AGENT_RESPONDER_HOME/config.yaml`` (default home
-``$HOME/.agent-responder``). It is optional. There are no per-field environment
+The config file lives at ``$LIGHT_HARNESS_HOME/config.yaml`` (default home
+``$HOME/.light-harness``). It is optional. There are no per-field environment
 overrides: every endpoint setting comes from the file, which may pull secrets
 from the environment with ``$NAME`` or ``${NAME}`` (set variables are
 substituted, unset ones are left as-is; but a provider ``api_key`` or webhook
@@ -45,11 +45,11 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def config_home() -> Path:
-    """The ``AGENT_RESPONDER_HOME`` directory, defaulting to ``$HOME/.agent-responder``."""
-    env_home = os.environ.get("AGENT_RESPONDER_HOME")
+    """The ``LIGHT_HARNESS_HOME`` directory, defaulting to ``$HOME/.light-harness``."""
+    env_home = os.environ.get("LIGHT_HARNESS_HOME")
     if env_home:
         return Path(env_home).expanduser()
-    return Path.home() / ".agent-responder"
+    return Path.home() / ".light-harness"
 
 
 def config_file_path() -> Path:
@@ -606,7 +606,7 @@ class Config:
 
     def system_prompt_for(self, agent: AgentConfig) -> str:
         """The system prompt for ``agent``: its persona's stored ``SOUL.md``
-        (under ``AGENT_RESPONDER_HOME``) if set, else the built-in default.
+        (under ``LIGHT_HARNESS_HOME``) if set, else the built-in default.
 
         Raises :class:`ValueError` if the agent's persona name is not a safe single
         path segment (see :func:`persona_dir`)."""

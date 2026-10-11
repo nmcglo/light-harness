@@ -1,7 +1,7 @@
 """Per-persona session logs.
 
 Each chat session is written to an append-only JSONL file under
-``AGENT_RESPONDER_HOME/personas/<persona>/sessions/``. The first line records
+``LIGHT_HARNESS_HOME/personas/<persona>/sessions/``. The first line records
 session metadata (persona, agent, model); every subsequent line is one chat
 message, so a session file captures the full conversation: user prompts,
 assistant replies, the tool calls the model requested, and each tool's result.

@@ -18,11 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_responder.agent import Agent
-from agent_responder.config import AgentConfig, Config, WebhookConfig
-from agent_responder.llm import ChatMessage, LLMResponse
-from agent_responder.tools import build_tool_registry
-from agent_responder.webhooks import (
+from light_harness.agent import Agent
+from light_harness.config import AgentConfig, Config, WebhookConfig
+from light_harness.llm import ChatMessage, LLMResponse
+from light_harness.tools import build_tool_registry
+from light_harness.webhooks import (
     _bearer_matches,
     create_webhook_server,
     parse_webhook_body,
@@ -60,7 +60,7 @@ class CapturingClient:
 @pytest.fixture()
 def webhook_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A webhook server on an ephemeral port backed by a capturing fake client."""
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     _write_cfg(
         tmp_path,
         """
@@ -154,7 +154,7 @@ def test_bearer_matches_rules() -> None:
 
 
 def _config_with(*hooks: WebhookConfig) -> Config:
-    from agent_responder.config import Interaction
+    from light_harness.config import Interaction
 
     return Config({}, [], {}, Interaction(), list(hooks))
 
@@ -177,7 +177,7 @@ def test_no_warning_when_all_webhooks_authenticated() -> None:
 
 
 def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     _write_cfg(
         tmp_path,
         """
@@ -219,7 +219,7 @@ def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_parse_webhooks_drops_malformed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     _write_cfg(
         tmp_path,
         """
@@ -245,7 +245,7 @@ def test_parse_webhooks_drops_malformed(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_endpoint_for_scopes_to_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     _write_cfg(
         tmp_path,
         """
@@ -311,7 +311,7 @@ def test_webhook_unknown_path_is_404(webhook_server) -> None:
 
 def test_webhook_unknown_agent_is_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A webhook referencing an unknown agent is an error, not an ack."""
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     _write_cfg(
         tmp_path,
         """
@@ -386,7 +386,7 @@ def test_webhook_rejects_malformed_content_length(webhook_server, value: str) ->
 
 
 def test_webhook_limits_concurrent_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     _write_cfg(
         tmp_path,
         """
@@ -454,8 +454,8 @@ def test_non_post_methods_get_405_with_allow(webhook_server, method: str) -> Non
 
 
 def test_release_agent_closes_session_even_if_client_close_fails(tmp_path: Path) -> None:
-    from agent_responder.sessions import SessionLog
-    from agent_responder.webhooks import _release_agent
+    from light_harness.sessions import SessionLog
+    from light_harness.webhooks import _release_agent
 
     class BrokenClient(CapturingClient):
         async def close(self) -> None:

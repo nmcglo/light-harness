@@ -1,4 +1,4 @@
-"""agent_responder -- a small agentic harness that runs LLM agents in response to
+"""light_harness -- a small agentic harness that runs LLM agents in response to
 triggers (a chat prompt, or an HTTP webhook).
 
 The core pieces:

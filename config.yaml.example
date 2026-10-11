@@ -1,6 +1,6 @@
 # Example configuration file.
 #
-# Copy to $AGENT_RESPONDER_HOME/config.yaml (default: ~/.agent-responder/config.yaml).
+# Copy to $LIGHT_HARNESS_HOME/config.yaml (default: ~/.light-harness/config.yaml).
 # The file is optional. Precedence: config file > built-in default.
 # Values may reference env vars ($NAME or ${NAME}); set vars are substituted and
 # unset ones are left as-is. Exception: a provider `api_key` or webhook `secret`
@@ -14,7 +14,7 @@
 # optional `tools` list (opt-in), and an optional `persona` (a key under `personas:`).
 #
 # `personas:` names the personas. Each named persona gets a directory under
-# AGENT_RESPONDER_HOME -- personas/<name>/ -- holding its SOUL.md plus a sessions/
+# LIGHT_HARNESS_HOME -- personas/<name>/ -- holding its SOUL.md plus a sessions/
 # directory of conversation logs. The SOUL.md value below seeds that file on first
 # run and becomes the system prompt for any agent that references the persona.
 #
@@ -27,7 +27,7 @@
 # that overrides the agent's default system prompt. `agent webhooks` serves them.
 #
 # There are no per-field env overrides; pull secrets in with $NAME as above.
-# AGENT_RESPONDER_HOME overrides the home dir.
+# LIGHT_HARNESS_HOME overrides the home dir.
 
 providers:
   local:
@@ -61,7 +61,7 @@ agents:
     model: gpt-4o-mini
 
 personas:
-  # A named persona. Each gets AGENT_RESPONDER_HOME/personas/<name>/ holding its
+  # A named persona. Each gets LIGHT_HARNESS_HOME/personas/<name>/ holding its
   # SOUL.md and a sessions/ directory of conversation logs. The SOUL.md value seeds
   # the file on first run and becomes the system prompt for agents using this persona.
   default:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_responder.config import (
+from light_harness.config import (
     AgentConfig,
     Config,
     config_file_path,
@@ -16,7 +16,7 @@ from agent_responder.config import (
     load_yaml,
     resolve_env,
 )
-from agent_responder.tools import build_tool_registry, builtin_tools
+from light_harness.tools import build_tool_registry, builtin_tools
 
 CFG = """
     providers:
@@ -48,7 +48,7 @@ def _write_cfg(home: Path, text: str) -> None:
 
 def test_agent_selects_provider_and_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, CFG)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     e = Config.load().endpoint()
     assert (e.model, e.base_url, e.api_key, e.timeout) == (
         "qwen3.8:27b",
@@ -60,7 +60,7 @@ def test_agent_selects_provider_and_model(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_switching_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, CFG)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     cfg = Config.load()
     cfg.agents = [AgentConfig(name="assistant", provider="openai", model="gpt-4o-mini")]
     e = cfg.endpoint()
@@ -75,7 +75,7 @@ def test_endpoint_ignores_global_env_and_scopes_credentials_per_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_cfg(tmp_path, CFG)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     for var in ("AGENT_PROVIDER", "AGENT_MODEL", "AGENT_BASE_URL", "AGENT_API_KEY"):
         monkeypatch.setenv(var, "from-env")
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai-key")
@@ -87,7 +87,7 @@ def test_endpoint_ignores_global_env_and_scopes_credentials_per_agent(
 
 
 def test_defaults_when_no_file_or_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     e = Config.load().endpoint()
     assert (e.model, e.base_url, e.api_key, e.timeout) == (
         "qwen3.8:27b",
@@ -99,7 +99,7 @@ def test_defaults_when_no_file_or_env(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_missing_provider_uses_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, "agents:\n  - name: a\n    provider: nope\n    model: some-model\n")
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     e = Config.load().endpoint()
     assert e.model == "some-model"
     assert e.base_url == "http://127.0.0.1:8000/v1"  # unknown provider -> defaults
@@ -107,7 +107,7 @@ def test_missing_provider_uses_defaults(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_malformed_providers_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, "providers: [not-a-dict]\nagents:\n  - name: a\n    model: m\n")
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     e = Config.load().endpoint()
     assert e.model == "m"
     assert e.base_url == "http://127.0.0.1:8000/v1"
@@ -119,22 +119,22 @@ def test_extra_provider_keys_tolerated(tmp_path: Path, monkeypatch: pytest.Monke
         "agents:\n  - name: a\n    model: m\n"
     )
     _write_cfg(tmp_path, cfg)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     e = Config.load().endpoint()
     assert e.base_url == "http://x/v1"
     assert e.model == "m"
 
 
 def test_config_home_respects_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     assert config_home() == tmp_path
     assert config_file_path() == tmp_path / "config.yaml"
 
 
 def test_config_home_defaults_to_home_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENT_RESPONDER_HOME", raising=False)
+    monkeypatch.delenv("LIGHT_HARNESS_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert config_home() == tmp_path / ".agent-responder"
+    assert config_home() == tmp_path / ".light-harness"
 
 
 def test_load_yaml_missing_returns_empty(tmp_path: Path) -> None:
@@ -168,7 +168,7 @@ def test_agent_tools_opt_in_from_config(tmp_path: Path, monkeypatch: pytest.Monk
         tmp_path,
         "agents:\n  - name: a\n    model: m\n    tools:\n      - echo\n      - add\n",
     )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     cfg = Config.load()
     assert cfg.active_agent().tools == ["echo", "add"]
     assert set(build_tool_registry(cfg.active_agent().tools).names()) == {"echo", "add"}
@@ -176,7 +176,7 @@ def test_agent_tools_opt_in_from_config(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_agent_tools_default_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, "agents:\n  - name: a\n    model: m\n")
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     assert Config.load().active_agent().tools is None
 
 
@@ -212,7 +212,7 @@ def test_file_env_value_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "providers:\n  local:\n    api_key: $MY_API_KEY\n"
         "agents:\n  - name: a\n    model: m\n",
     )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     monkeypatch.setenv("MY_API_KEY", "resolved-key")
     assert Config.load().endpoint().api_key == "resolved-key"
 
@@ -225,7 +225,7 @@ def test_unset_env_in_api_key_is_cleared_with_warning(
         "providers:\n  local:\n    api_key: $NO_SUCH_KEY\n    base_url: http://$NO_SUCH_HOST/v1\n"
         "agents:\n  - name: a\n    model: m\n",
     )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     monkeypatch.delenv("NO_SUCH_KEY", raising=False)
     monkeypatch.delenv("NO_SUCH_HOST", raising=False)
     config = Config.load()
@@ -246,7 +246,7 @@ def test_webhook_with_unset_secret_variable_is_disabled(
         "  - {path: /set, agent: a, secret: $SET_SECRET}\n"
         "  - {path: /unset, agent: a, secret: $NO_SUCH_SECRET}\n",
     )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     monkeypatch.setenv("SET_SECRET", "s3cret")
     monkeypatch.delenv("NO_SUCH_SECRET", raising=False)
     config = Config.load()
@@ -257,7 +257,7 @@ def test_webhook_with_unset_secret_variable_is_disabled(
 def test_file_env_value_in_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = "providers:\n  local:\n    models:\n      - $MODEL_NAME\n"
     _write_cfg(tmp_path, cfg)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     monkeypatch.setenv("MODEL_NAME", "big-model")
     assert Config.load().providers["local"].models == ["big-model"]
 
@@ -276,7 +276,7 @@ def test_active_agent_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         "    agent: second\n"
     )
     _write_cfg(tmp_path, cfg_text)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     active = Config.load().active_agent()
     assert active.name == "second"
     assert active.model == "b-model"
@@ -293,13 +293,13 @@ def test_active_agent_first_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "    agent: missing\n"
     )
     _write_cfg(tmp_path, cfg_text)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     assert Config.load().active_agent().name == "first"
 
 
 def test_active_agent_empty_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, "providers:\n  local:\n    base_url: http://x/v1\n")
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     active = Config.load().active_agent()
     assert active.name == "default"
     assert active.provider == "local"
@@ -317,14 +317,14 @@ def test_system_prompt_for_persona(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "    SOUL.md: You are a kind helper.\n"
     )
     _write_cfg(tmp_path, cfg_text)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     cfg = Config.load()
     assert cfg.system_prompt_for(cfg.active_agent()) == "You are a kind helper."
 
 
 def test_system_prompt_for_no_persona(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(tmp_path, "agents:\n  - name: assistant\n    provider: local\n    model: m\n")
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     cfg = Config.load()
     assert cfg.system_prompt_for(cfg.active_agent()) == "You are a helpful assistant."
 
@@ -338,13 +338,13 @@ def test_system_prompt_for_unknown_persona(tmp_path: Path, monkeypatch: pytest.M
         "    persona: ghost\n"
     )
     _write_cfg(tmp_path, cfg_text)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     cfg = Config.load()
     assert cfg.system_prompt_for(cfg.active_agent()) == "You are a helpful assistant."
 
 
 def test_parse_personas() -> None:
-    from agent_responder.config import _parse_personas
+    from light_harness.config import _parse_personas
 
     raw = {
         "a": {"SOUL.md": "Hello", "other.txt": "x"},
@@ -360,7 +360,7 @@ def test_parse_personas() -> None:
 
 
 def test_parse_interaction() -> None:
-    from agent_responder.config import _parse_interaction
+    from light_harness.config import _parse_interaction
 
     assert _parse_interaction({"chat": {"agent": "x"}}, []).chat.agent == "x"
     assert _parse_interaction(None, []).chat.agent == "default"
@@ -372,7 +372,7 @@ def test_config_load_creates_persona_dirs(tmp_path: Path, monkeypatch: pytest.Mo
         tmp_path,
         "personas:\n  helpful:\n    SOUL.md: You are a kind helper.\n",
     )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     Config.load()
     persona_dir = tmp_path / "personas" / "helpful"
     assert (persona_dir / "SOUL.md").read_text(encoding="utf-8") == "You are a kind helper."
@@ -384,7 +384,7 @@ def test_system_prompt_is_read_from_disk(tmp_path: Path, monkeypatch: pytest.Mon
         tmp_path,
         "personas:\n  helpful:\n    SOUL.md: You are a kind helper.\n",
     )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     agent = AgentConfig(persona="helpful")
     assert Config.load().system_prompt_for(agent) == "You are a kind helper."
 
@@ -395,7 +395,7 @@ def test_system_prompt_is_read_from_disk(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_ensure_persona_does_not_overwrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     ensure_persona("custom", seed="initial seed")
     soul = tmp_path / "personas" / "custom" / "SOUL.md"
     assert soul.read_text(encoding="utf-8") == "initial seed"
@@ -407,7 +407,7 @@ def test_ensure_persona_does_not_overwrite(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_load_yaml_invalid_yaml_raises(tmp_path: Path) -> None:
-    from agent_responder.config import ConfigError
+    from light_harness.config import ConfigError
 
     bad = tmp_path / "config.yaml"
     bad.write_text("agents: [unclosed\n", encoding="utf-8")
@@ -423,7 +423,7 @@ def test_load_yaml_invalid_yaml_raises(tmp_path: Path) -> None:
 def test_config_load_reports_dropped_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
         textwrap.dedent(
             """
@@ -456,7 +456,7 @@ def test_config_load_reports_dropped_entries(
 
 
 def test_persona_paths_reject_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     for bad in ("../x", "a/b", "..", ""):
         with pytest.raises(ValueError, match="invalid persona name"):
             ensure_persona(bad)
@@ -466,7 +466,7 @@ def test_persona_paths_reject_traversal(tmp_path: Path, monkeypatch: pytest.Monk
 def test_load_dotenv_sets_missing_without_overriding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agent_responder.config import load_dotenv
+    from light_harness.config import load_dotenv
 
     env = tmp_path / ".env"
     env.write_text(
@@ -494,7 +494,7 @@ def test_load_dotenv_sets_missing_without_overriding(
 def test_system_prompt_for_rejects_unsafe_persona_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     config = Config.load()
     config.personas["../evil"] = {"SOUL.md": "pwned"}
     with pytest.raises(ValueError, match="invalid persona name"):

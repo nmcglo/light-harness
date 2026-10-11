@@ -1,4 +1,4 @@
-"""Text-matching and diff helpers for :class:`~agent_responder.tools.builtin.EditFileTool`.
+"""Text-matching and diff helpers for :class:`~light_harness.tools.builtin.EditFileTool`.
 
 This mirrors the semantics of Pi's ``edit`` tool: multiple disjoint exact-text
 replacements per call, all matched against the *original* file (not

@@ -171,7 +171,7 @@ async def _run_turn(agent: Agent, prompt: str) -> None:
 
 async def _run_repl(agent: Agent) -> None:
     console.print(
-        "[bold]Agentic responder[/bold] -- type a prompt, or [italic]exit[/italic] to quit."
+        "[bold]light-harness[/bold] -- type a prompt, or [italic]exit[/italic] to quit."
     )
     while True:
         try:

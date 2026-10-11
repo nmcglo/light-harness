@@ -17,13 +17,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_responder.web import create_server
+from light_harness.web import create_server
 
 
 @pytest.fixture()
 def web_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """Start a real config web server on an ephemeral port; yield its base URL."""
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     (tmp_path / "config.yaml").unlink(missing_ok=True)
     server = create_server("127.0.0.1", 0)
     port = server.server_address[1]
@@ -123,7 +123,7 @@ def test_cors_preflight(web_base: str) -> None:
 def test_cors_origin_configurable_and_disableable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     for configured, expected in (("http://ui.example", "http://ui.example"), ("", None)):
         server = create_server("127.0.0.1", 0, cors_origin=configured)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -150,7 +150,7 @@ def test_rejects_unexpected_host_header(web_base: str) -> None:
 def test_serves_html_page(web_base: str) -> None:
     status, body = _get(web_base + "/")
     assert status == 200
-    assert "agent-responder" in body
+    assert "light-harness" in body
     assert "provider-list" in body
     assert "agent-provider" in body
 

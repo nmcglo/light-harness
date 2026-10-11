@@ -44,7 +44,7 @@ _PAGE_HEAD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="agent-token" content="__AGENT_TOKEN__">
-<title>agent-responder</title>
+<title>light-harness</title>
 <style>
 """
 _PAGE_CSS = """  :root {
@@ -131,7 +131,7 @@ _PAGE_CSS = """  :root {
 _PAGE_BODY = """<body>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand">agent-responder</div>
+    <div class="brand">light-harness</div>
     <nav class="nav">
       <a href="#config" class="active">Config</a>
     </nav>
@@ -733,7 +733,7 @@ def _write_config_text(text: str) -> Path:
 class ConfigHandler(BaseHTTPRequestHandler):
     """Serve the config page and a tiny JSON API for reading/writing the file."""
 
-    server_version = "AgentResponderWeb/1.0"
+    server_version = "LightHarnessWeb/1.0"
 
     # Bound per server by create_server().
     api_token: str

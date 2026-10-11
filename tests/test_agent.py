@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from agent_responder.agent import Agent
-from agent_responder.llm import ChatMessage, LLMResponse, ToolCall
-from agent_responder.tools import default_registry
+from light_harness.agent import Agent
+from light_harness.llm import ChatMessage, LLMResponse, ToolCall
+from light_harness.tools import default_registry
 
 
 class FakeClient:
@@ -65,7 +65,7 @@ def test_agent_stops_at_step_budget() -> None:
 def test_tool_call_times_out_and_reports_error() -> None:
     import asyncio
 
-    from agent_responder.tools import ToolRegistry
+    from light_harness.tools import ToolRegistry
 
     class SlowTool:
         name = "slow"
@@ -106,8 +106,8 @@ def test_registry_validates_arguments_before_running() -> None:
 def _mock_client(handler):
     import httpx
 
-    from agent_responder.config import Settings
-    from agent_responder.llm import OpenAICompatibleClient
+    from light_harness.config import Settings
+    from light_harness.llm import OpenAICompatibleClient
 
     http = httpx.AsyncClient(
         base_url="http://llm.test/v1", transport=httpx.MockTransport(handler)
