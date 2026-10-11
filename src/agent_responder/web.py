@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from .config import config_file_path, load_yaml
+from .httputil import BodyError, read_body
 from .tools import builtin_tools
 
 DEFAULT_HOST = "127.0.0.1"
@@ -736,11 +737,15 @@ class ConfigHandler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] != "/api/config":
             self._send_json(404, {"error": "not found"})
             return
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            raw = read_body(self)
+        except BodyError as exc:
+            self.close_connection = True
+            self._send_json(exc.status, {"ok": False, "error": exc.message})
+            return
         try:
             payload = json.loads(raw) if raw else {}
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:  # JSONDecodeError or invalid UTF-8
             self._send_json(400, {"ok": False, "error": f"Invalid JSON: {exc}"})
             return
         if not isinstance(payload, dict):

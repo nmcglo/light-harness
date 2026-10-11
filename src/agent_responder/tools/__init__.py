@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .base import Tool
 from .builtin import build_tool_registry, builtin_tools, default_registry
 
+TOOL_TIMEOUT_SECONDS = 60.0
+
 
 class ToolRegistry:
-    """A registry of :class:`Tool` instances keyed by name."""
+    """A registry of :class:`Tool` instances keyed by name.
 
-    def __init__(self) -> None:
+    Each tool call is limited to ``timeout`` seconds (async tools only: a tool
+    blocking the event loop synchronously cannot be interrupted)."""
+
+    def __init__(self, timeout: float = TOOL_TIMEOUT_SECONDS) -> None:
+        self.timeout = timeout
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -44,7 +51,9 @@ class ToolRegistry:
         if tool is None:
             return f"Error: unknown tool '{name}'."
         try:
-            result = await tool.run(arguments)
+            result = await asyncio.wait_for(tool.run(arguments), timeout=self.timeout)
+        except TimeoutError:
+            return f"Error: tool '{name}' timed out after {self.timeout:g}s."
         except Exception as exc:  # noqa: BLE001 - report tool errors to the model
             return f"Error: {type(exc).__name__}: {exc}"
         return result if isinstance(result, str) else str(result)

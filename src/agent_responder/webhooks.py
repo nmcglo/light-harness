@@ -21,12 +21,14 @@ from urllib.parse import urlsplit
 
 from .agent import Agent
 from .config import AgentConfig, Config, WebhookConfig, ensure_persona, persona_sessions_dir
+from .httputil import BodyError, read_body
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import build_tool_registry
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
+DEFAULT_MAX_CONCURRENT_RUNS = 4
 
 
 def parse_webhook_body(body: bytes) -> str:
@@ -95,6 +97,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     """Route POSTs to configured webhook paths and run the target agent."""
 
     config: Config
+    run_slots: threading.BoundedSemaphore
 
     def do_GET(self) -> None:
         self._send_json(405, {"message": "webhooks accept POST only"})
@@ -108,26 +111,40 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if not _bearer_matches(webhook.secret, self.headers.get("Authorization")):
             self._send_json(401, {"message": "unauthorized"})
             return
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = read_body(self)
+        except BodyError as exc:
+            self.close_connection = True
+            self._send_json(exc.status, {"message": exc.message})
+            return
+        # Bound concurrent runs: each accepted POST is an LLM run on its own thread.
+        if not self.run_slots.acquire(blocking=False):
+            self._send_json(429, {"message": "too many concurrent webhook runs; retry later"})
+            return
         # Ack immediately: confirm the agent can start, then run it in the
         # background so the sender isn't held open while the model works.
         try:
             agent = self._make_agent(webhook)
+            self._spawn(agent, body)
         except Exception as exc:  # noqa: BLE001 - report the failure to the caller
+            self.run_slots.release()
             self._send_json(500, {"message": f"{type(exc).__name__}: {exc}"})
             return
-        self._spawn(agent, body)
         self._send_json(200, {"agent": webhook.agent, "message": "OK"})
 
     def _spawn(self, agent: Agent, body: bytes) -> None:
-        """Run ``agent`` in the background; the caller already has its ack."""
+        """Run ``agent`` in the background; the caller already has its ack.
+
+        The worker releases the caller's run slot when it finishes."""
+        slots = self.run_slots
 
         def worker() -> None:
             try:
                 asyncio.run(self._run(agent, body))
             except Exception as exc:  # noqa: BLE001 - no caller left to report to
                 print(f"webhook run failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            finally:
+                slots.release()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -160,15 +177,20 @@ def create_webhook_server(
     host: str,
     port: int,
     agent_factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] | None = None,
+    max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS,
 ) -> ThreadingHTTPServer:
-    """Build (but do not start) the webhook server for ``config``."""
+    """Build (but do not start) the webhook server for ``config``.
+
+    At most ``max_concurrent_runs`` agent runs are in flight; further POSTs get 429."""
     factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] = (
         default_agent_factory if agent_factory is None else agent_factory
     )
     bound_config = config
+    bound_slots = threading.BoundedSemaphore(max(1, max_concurrent_runs))
 
     class BoundHandler(WebhookHandler):
         config = bound_config
+        run_slots = bound_slots
 
         def _make_agent(self, webhook: WebhookConfig) -> Agent:
             agent_cfg = self.config.get_agent(webhook.agent)
