@@ -240,8 +240,7 @@ def test_resolve_env_nonvar_and_plain() -> None:
 def test_file_env_value_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(
         tmp_path,
-        "providers:\n  local:\n    api_key: $MY_API_KEY\n"
-        "agents:\n  - name: a\n    model: m\n",
+        "providers:\n  local:\n    api_key: $MY_API_KEY\nagents:\n  - name: a\n    model: m\n",
     )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
@@ -252,8 +251,7 @@ def test_file_env_value_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def test_file_env_unset_left_literal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(
         tmp_path,
-        "providers:\n  local:\n    api_key: $NO_SUCH_KEY\n"
-        "agents:\n  - name: a\n    model: m\n",
+        "providers:\n  local:\n    api_key: $NO_SUCH_KEY\nagents:\n  - name: a\n    model: m\n",
     )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
@@ -273,8 +271,7 @@ def test_file_env_value_in_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_env_override_beats_file_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(
         tmp_path,
-        "providers:\n  local:\n    api_key: $MY_API_KEY\n"
-        "agents:\n  - name: a\n    model: m\n",
+        "providers:\n  local:\n    api_key: $MY_API_KEY\nagents:\n  - name: a\n    model: m\n",
     )
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
@@ -357,11 +354,7 @@ def test_system_prompt_for_no_persona(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_system_prompt_for_unknown_persona(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_text = (
-        "agents:\n"
-        "  - name: assistant\n"
-        "    provider: local\n"
-        "    model: m\n"
-        "    persona: ghost\n"
+        "agents:\n  - name: assistant\n    provider: local\n    model: m\n    persona: ghost\n"
     )
     _write_cfg(tmp_path, cfg_text)
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
@@ -378,20 +371,20 @@ def test_parse_personas() -> None:
         "b": "not-a-dict",
         "c": {"num": 3, "txt": "y"},
     }
-    parsed = _parse_personas(raw)
+    parsed = _parse_personas(raw, [])
     assert parsed == {
         "a": {"SOUL.md": "Hello", "other.txt": "x"},
         "c": {"num": "3", "txt": "y"},
     }
-    assert _parse_personas(None) == {}
+    assert _parse_personas(None, []) == {}
 
 
 def test_parse_interaction() -> None:
     from agent_responder.config import _parse_interaction
 
-    assert _parse_interaction({"chat": {"agent": "x"}}).chat.agent == "x"
-    assert _parse_interaction(None).chat.agent == "default"
-    assert _parse_interaction({"chat": "wrong"}).chat.agent == "default"
+    assert _parse_interaction({"chat": {"agent": "x"}}, []).chat.agent == "x"
+    assert _parse_interaction(None, []).chat.agent == "default"
+    assert _parse_interaction({"chat": "wrong"}, []).chat.agent == "default"
 
 
 def test_config_load_creates_persona_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,3 +427,88 @@ def test_ensure_persona_does_not_overwrite(tmp_path: Path, monkeypatch: pytest.M
     # A later ensure with a different seed must not overwrite the existing file.
     ensure_persona("custom", seed="second seed")
     assert soul.read_text(encoding="utf-8") == "initial seed"
+
+
+def test_load_yaml_invalid_yaml_raises(tmp_path: Path) -> None:
+    from agent_responder.config import ConfigError
+
+    bad = tmp_path / "config.yaml"
+    bad.write_text("agents: [unclosed\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="cannot parse"):
+        load_yaml(bad)
+    bad.write_text("- just\n- a list\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="mapping"):
+        load_yaml(bad)
+    bad.write_text("", encoding="utf-8")
+    assert load_yaml(bad) == {}
+
+
+def test_config_load_reports_dropped_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        textwrap.dedent(
+            """
+            agents:
+              - name: ok
+              - name: ok
+              - {model: nameless}
+            webhooks:
+              - {path: no-slash}
+              - {path: /a, agent: ok, secret: [not, a, string]}
+            personas:
+              "../evil": {SOUL.md: x}
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = Config.load()
+    assert [a.name for a in config.agents] == ["ok"]
+    assert config.webhooks == []
+    joined = "\n".join(config.warnings)
+    for fragment in (
+        "duplicate agent name 'ok'",
+        "missing or empty 'name'",
+        "'path'",
+        "'secret'",
+        "invalid persona name",
+    ):
+        assert fragment in joined
+    assert not (tmp_path.parent / "evil").exists()
+
+
+def test_persona_paths_reject_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    for bad in ("../x", "a/b", "..", ""):
+        with pytest.raises(ValueError, match="invalid persona name"):
+            ensure_persona(bad)
+    assert not (tmp_path.parent / "x").exists()
+
+
+def test_load_dotenv_sets_missing_without_overriding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_responder.config import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "# comment\nAGENT_API_KEY=from-file\nexport AGENT_MODEL='quoted model'\n"
+        'AGENT_BASE_URL="http://x/v1" \nAGENT_TIMEOUT=30 # trailing\nnot a pair\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_BASE_URL", raising=False)
+    monkeypatch.delenv("AGENT_TIMEOUT", raising=False)
+    monkeypatch.setenv("AGENT_MODEL", "already-set")
+    applied = load_dotenv(env)
+    import os
+
+    assert sorted(applied) == ["AGENT_API_KEY", "AGENT_BASE_URL", "AGENT_TIMEOUT"]
+    assert os.environ["AGENT_API_KEY"] == "from-file"
+    assert os.environ["AGENT_BASE_URL"] == "http://x/v1"
+    assert os.environ["AGENT_TIMEOUT"] == "30"
+    assert os.environ["AGENT_MODEL"] == "already-set"  # env wins over .env
+    for key in ("AGENT_API_KEY", "AGENT_BASE_URL", "AGENT_TIMEOUT"):
+        monkeypatch.delenv(key)
+    assert load_dotenv(tmp_path / "missing.env") == []

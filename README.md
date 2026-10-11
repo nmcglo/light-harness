@@ -15,7 +15,7 @@ models.
 
 ```sh
 uv sync --group dev        # create .venv, install deps, write uv.lock
-cp .env.example .env       # then set AGENT_API_KEY (or export OPENAI_API_KEY)
+cp .env.example .env       # then set AGENT_API_KEY (or OPENAI_API_KEY); `agent` loads ./.env
 
 uv run agent tools         # list the built-in example tools
 uv run agent chat "What is 2 + 3?"
@@ -58,6 +58,12 @@ built-in default**. The file is optional.
 - **Env vars**: `AGENT_PROVIDER`, `AGENT_MODEL`, `AGENT_BASE_URL`,
   `AGENT_API_KEY` (or `OPENAI_API_KEY`), `AGENT_TIMEOUT`.
   `AGENT_RESPONDER_HOME` overrides the config home directory.
+- **`.env`**: the CLI loads `./.env` (`KEY=VALUE` lines) at startup. Variables
+  already set in the environment win over the file.
+- **Errors**: a config file that is not valid YAML (or whose top level is not a
+  mapping) aborts the command with an error. Individual malformed entries
+  (an agent without a name, a webhook without a `/` path, ...) are dropped and
+  reported as `Config warning:` lines on stderr.
 - **Env interpolation**: config values may use `$NAME` or `${NAME}`; set
   variables are substituted, unset ones are left as-is.
 
