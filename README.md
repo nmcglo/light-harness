@@ -112,6 +112,20 @@ write back to `config.yaml` (env refs like `$NAME` / `${NAME}` are preserved),
 and on-disk changes are reflected automatically. A running `agent chat` session
 is unaffected -- changes apply to the next session.
 
+**Access control.** The config holds API keys and webhook secrets, so the API is
+not open to arbitrary web pages even though CORS defaults to `*`:
+
+- Every `/api/*` request needs the per-launch token in an `X-Agent-Token` header.
+  The token is embedded in the served page (which is sent with `Cache-Control:
+  no-store` and no CORS headers, so other sites cannot read it) and printed at
+  startup for scripts. It changes on every launch.
+- The `Host` header must be `localhost`, `127.0.0.1`, `::1` or the bind host
+  (blocks DNS rebinding). This check is skipped when binding `0.0.0.0` / `::`.
+- `Access-Control-Allow-Origin` on `/api/*` is `*` by default; set
+  `--cors-origin https://ui.example` to restrict it, or `--cors-origin ""` to
+  disable CORS. Note that with `*` the token is the only thing protecting the API:
+  anyone who obtains it (e.g. from the startup output) can call it from any origin.
+
 ## Webhook listeners
 
 `agent webhooks` serves the webhooks named in the `webhooks:` config section on a

@@ -133,9 +133,16 @@ def tools() -> None:
 def web(
     host: Annotated[str, typer.Option("--host", help="Bind host.")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", help="Bind port.")] = 8765,
+    cors_origin: Annotated[
+        str,
+        typer.Option(
+            "--cors-origin",
+            help="Access-Control-Allow-Origin for /api/* (empty disables CORS).",
+        ),
+    ] = "*",
 ) -> None:
     """Serve a web UI for viewing and editing the config file."""
-    serve_config(host=host, port=port)
+    serve_config(host=host, port=port, cors_origin=cors_origin)
 
 
 @app.command()

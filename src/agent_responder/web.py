@@ -19,12 +19,15 @@ Endpoints:
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import os
+import secrets
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -40,6 +43,7 @@ _PAGE_HEAD = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="agent-token" content="__AGENT_TOKEN__">
 <title>agent-responder</title>
 <style>
 """
@@ -176,6 +180,12 @@ _PAGE_BODY = """<body>
 _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDirty: false,
     busy: false, lastText: "" };
 
+  var API_TOKEN = document.querySelector('meta[name="agent-token"]').content;
+  function apiFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers, { "X-Agent-Token": API_TOKEN });
+    return fetch(url, opts);
+  }
   var pathEl = document.getElementById("path");
   var statusEl = document.getElementById("status");
   var providerList = document.getElementById("provider-list");
@@ -440,7 +450,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   }
 
   async function fetchConfig() {
-    var res = await fetch("/api/config");
+    var res = await apiFetch("/api/config");
     var data = await res.json();
     pathEl.value = data.path;
     state.lastText = data.text == null ? "" : data.text;
@@ -468,7 +478,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
         personas: collectPersonas(),
         interaction: collectInteraction()
       });
-      var res = await fetch("/api/config", {
+      var res = await apiFetch("/api/config", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: body
       });
       var data = await res.json();
@@ -557,7 +567,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
 
   setInterval(async function () {
     try {
-      var res = await fetch("/api/config");
+      var res = await apiFetch("/api/config");
       var data = await res.json();
       var text = data.text == null ? "" : data.text;
       if (text === state.lastText) return;
@@ -568,7 +578,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
 
   (async function init() {
     try {
-      var res = await fetch("/api/tools");
+      var res = await apiFetch("/api/tools");
       state.builtinTools = (await res.json()).tools || [];
     } catch (e) { state.builtinTools = []; }
     loadConfig();
@@ -719,8 +729,37 @@ class ConfigHandler(BaseHTTPRequestHandler):
 
     server_version = "AgentResponderWeb/1.0"
 
+    # Bound per server by create_server().
+    api_token: str
+    cors_allow_origin: str | None
+    allowed_hosts: frozenset[str] | None
+
+    def _host_allowed(self) -> bool:
+        """Reject unexpected ``Host`` headers (DNS rebinding)."""
+        if self.allowed_hosts is None:
+            return True
+        try:
+            hostname = urlsplit("//" + (self.headers.get("Host") or "")).hostname
+        except ValueError:
+            return False
+        return hostname is not None and hostname.lower() in self.allowed_hosts
+
+    def _guard(self, api: bool) -> bool:
+        """Apply the Host check and, for ``/api/*``, the token check; send the
+        error response and return False when the request must not proceed."""
+        if not self._host_allowed():
+            self._send_json(403, {"error": "forbidden host"})
+            return False
+        supplied = self.headers.get("X-Agent-Token") or ""
+        if api and not hmac.compare_digest(supplied, self.api_token):
+            self._send_json(401, {"error": "missing or invalid X-Agent-Token"})
+            return False
+        return True
+
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
+        if not self._guard(api=path.startswith("/api/")):
+            return
         if path in ("", "/"):
             self._send_html(200, _PAGE)
         elif path == "/api/config":
@@ -733,7 +772,23 @@ class ConfigHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": "not found"})
 
+    def do_OPTIONS(self) -> None:
+        """CORS preflight for ``/api/*``. Needs no token (browsers don't send one)."""
+        if not self._host_allowed():
+            self._send_json(403, {"error": "forbidden host"})
+            return
+        self.send_response(204)
+        self._send_cors_headers()
+        if self.cors_allow_origin is not None:
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Agent-Token")
+            self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self) -> None:
+        if not self._guard(api=True):
+            return
         if self.path.split("?", 1)[0] != "/api/config":
             self._send_json(404, {"error": "not found"})
             return
@@ -791,14 +846,24 @@ class ConfigHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_cors_headers(self) -> None:
+        if self.cors_allow_origin is not None:
+            self.send_header("Access-Control-Allow-Origin", self.cors_allow_origin)
+            if self.cors_allow_origin != "*":
+                self.send_header("Vary", "Origin")
+
     def _send_html(self, status: int, html: str) -> None:
-        body = html.encode("utf-8")
+        body = html.replace("__AGENT_TOKEN__", self.api_token).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # The page embeds the API token: never cache it or let it be framed.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(body)
 
@@ -806,16 +871,52 @@ class ConfigHandler(BaseHTTPRequestHandler):
         """Keep the console clean while the server runs."""
 
 
-def create_server(host: str, port: int) -> ThreadingHTTPServer:
-    """Build (but do not start) the config web server."""
-    return ThreadingHTTPServer((host, port), ConfigHandler)
+class ConfigServer(ThreadingHTTPServer):
+    """The config web server; ``token`` is the per-launch API token."""
+
+    token: str
 
 
-def serve_config(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+def _allowed_hosts(bind_host: str) -> frozenset[str] | None:
+    """Hostnames a request's ``Host`` header may carry, or ``None`` (no check) when
+    bound to a wildcard address where the served names can't be known."""
+    if bind_host in ("", "0.0.0.0", "::"):
+        return None
+    return frozenset({"localhost", "127.0.0.1", "::1", bind_host.lower()})
+
+
+def create_server(host: str, port: int, cors_origin: str | None = "*") -> ConfigServer:
+    """Build (but do not start) the config web server.
+
+    ``cors_origin`` is sent as ``Access-Control-Allow-Origin`` on ``/api/*``
+    responses (default ``*``; empty/``None`` disables CORS). Every ``/api/*``
+    request must also carry the per-launch token (``server.token``) in an
+    ``X-Agent-Token`` header, so permissive CORS does not let other sites use the
+    API. The token is only embedded in the HTML page, which is never sent with CORS
+    headers and is guarded by a ``Host`` allow-list against DNS rebinding."""
+    token = secrets.token_urlsafe(32)
+    origin = cors_origin or None
+    hosts = _allowed_hosts(host)
+
+    class BoundHandler(ConfigHandler):
+        api_token = token
+        cors_allow_origin = origin
+        allowed_hosts = hosts
+
+    server = ConfigServer((host, port), BoundHandler)
+    server.token = token
+    return server
+
+
+def serve_config(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, cors_origin: str | None = "*"
+) -> None:
     """Run the config web server until interrupted (blocking)."""
-    server = create_server(host, port)
+    server = create_server(host, port, cors_origin)
     print(f"Serving config UI at http://{host}:{port}/")
     print(f"Config file: {config_file_path()}")
+    print(f"CORS allow-origin: {cors_origin or '(disabled)'}")
+    print(f"API token (send as 'X-Agent-Token' to call /api/* directly): {server.token}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
