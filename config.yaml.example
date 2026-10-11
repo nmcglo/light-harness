@@ -1,7 +1,7 @@
 # Example configuration file.
 #
 # Copy to $AGENT_RESPONDER_HOME/config.yaml (default: ~/.agent-responder/config.yaml).
-# The file is optional. Precedence for every value: env var > config file > default.
+# The file is optional. Precedence: config file > built-in default.
 # Values may reference env vars ($NAME or ${NAME}); set vars are substituted,
 # unset ones are left as-is.
 #
@@ -24,8 +24,8 @@
 # set, requires `Authorization: Bearer <secret>`, and an optional `system_prompt`
 # that overrides the agent's default system prompt. `agent webhooks` serves them.
 #
-# Env overrides: AGENT_PROVIDER, AGENT_MODEL, AGENT_BASE_URL, AGENT_API_KEY
-# (or OPENAI_API_KEY), AGENT_TIMEOUT. AGENT_RESPONDER_HOME overrides the home dir.
+# There are no per-field env overrides; pull secrets in with $NAME as above.
+# AGENT_RESPONDER_HOME overrides the home dir.
 
 providers:
   local:

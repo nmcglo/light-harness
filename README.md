@@ -15,7 +15,8 @@ models.
 
 ```sh
 uv sync --group dev        # create .venv, install deps, write uv.lock
-cp .env.example .env       # then set AGENT_API_KEY (or OPENAI_API_KEY); `agent` loads ./.env
+cp .env.example .env       # secrets referenced from config.yaml as $NAME; `agent` loads ./.env
+cp config.yaml.example ~/.agent-responder/config.yaml   # then edit
 
 uv run agent tools         # list the built-in example tools
 uv run agent chat "What is 2 + 3?"
@@ -50,14 +51,14 @@ replies, tool calls, and tool results.
 
 ## Configuration
 
-Settings load with this precedence: **environment variable > config file >
-built-in default**. The file is optional.
+Settings come from the config file, falling back to built-in defaults. There
+are no per-field environment overrides: each agent resolves its own provider,
+model, base URL and API key, so agents on different providers never share
+credentials. Secrets are pulled from the environment by interpolation (below).
 
 - **Config file**: `$AGENT_RESPONDER_HOME/config.yaml` (default home
   `$HOME/.agent-responder/config.yaml`). See `config.yaml.example` for a template.
-- **Env vars**: `AGENT_PROVIDER`, `AGENT_MODEL`, `AGENT_BASE_URL`,
-  `AGENT_API_KEY` (or `OPENAI_API_KEY`), `AGENT_TIMEOUT`.
-  `AGENT_RESPONDER_HOME` overrides the config home directory.
+- **Env var**: `AGENT_RESPONDER_HOME` overrides the config home directory.
 - **`.env`**: the CLI loads `./.env` (`KEY=VALUE` lines) at startup. Variables
   already set in the environment win over the file.
 - **Errors**: a config file that is not valid YAML (or whose top level is not a
@@ -134,5 +135,5 @@ uv run agent webhooks --host 0.0.0.0 # expose beyond localhost
   / `async run(**kwargs) -> str`, then `registry.register(MyTool())`.
 - **Use a different model**: implement the `LLMClient` protocol
   (`async chat(...) -> LLMResponse`, `async close()`) and pass it to `Agent`.
-  Point the default client at any OpenAI-compatible endpoint via
-  `AGENT_BASE_URL` / `AGENT_MODEL`.
+  The default client talks to any OpenAI-compatible endpoint; set it per
+  provider with `base_url` in `config.yaml`.
