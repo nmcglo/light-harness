@@ -52,5 +52,10 @@ class SessionLog:
         self._fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
         self._fh.flush()
 
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has been called."""
+        return self._fh.closed
+
     def close(self) -> None:
         self._fh.close()

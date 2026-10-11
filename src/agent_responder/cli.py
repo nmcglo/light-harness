@@ -33,7 +33,7 @@ from .tools import ToolRegistry, build_tool_registry
 from .web import serve_config
 from .webhooks import DEFAULT_HOST, DEFAULT_PORT, serve_webhooks
 
-app = typer.Typer(help="Agentic responder scaffold.")
+app = typer.Typer(help="Run LLM agents in response to chat prompts and webhooks.")
 console = Console()
 err_console = Console(stderr=True)
 
@@ -102,9 +102,9 @@ def chat(
         raise typer.Exit(code=1)
 
     registry = build_tool_registry(active.tools, active.workspace_path())
-    system_prompt = config.system_prompt_for(active)
     persona_name = active.persona or active.name
     try:
+        system_prompt = config.system_prompt_for(active)
         ensure_persona(persona_name)
     except ValueError as exc:
         err_console.print(f"[red]Error:[/red] {exc}")

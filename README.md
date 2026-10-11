@@ -66,7 +66,10 @@ credentials. Secrets are pulled from the environment by interpolation (below).
   (an agent without a name, a webhook without a `/` path, ...) are dropped and
   reported as `Config warning:` lines on stderr.
 - **Env interpolation**: config values may use `$NAME` or `${NAME}`; set
-  variables are substituted, unset ones are left as-is.
+  variables are substituted, unset ones are left as-is -- except in credentials,
+  where that would be unsafe: a provider `api_key` that references an unset
+  variable is cleared (so `agent chat` reports "No API key"), and a webhook whose
+  `secret` references one is disabled. Each case prints a `Config warning:`.
 
 The file is sectioned:
 

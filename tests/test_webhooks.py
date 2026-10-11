@@ -29,20 +29,6 @@ from agent_responder.webhooks import (
     unauthenticated_warning,
 )
 
-_ALL_VARS = (
-    "AGENT_MODEL",
-    "AGENT_PROVIDER",
-    "AGENT_BASE_URL",
-    "AGENT_API_KEY",
-    "AGENT_TIMEOUT",
-    "OPENAI_API_KEY",
-)
-
-
-def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in _ALL_VARS:
-        monkeypatch.delenv(var, raising=False)
-
 
 def _write_cfg(home: Path, text: str) -> None:
     home.mkdir(parents=True, exist_ok=True)
@@ -75,7 +61,6 @@ class CapturingClient:
 def webhook_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A webhook server on an ephemeral port backed by a capturing fake client."""
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
     _write_cfg(
         tmp_path,
         """
@@ -193,7 +178,6 @@ def test_no_warning_when_all_webhooks_authenticated() -> None:
 
 def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
     _write_cfg(
         tmp_path,
         """
@@ -236,7 +220,6 @@ def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_parse_webhooks_drops_malformed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
     _write_cfg(
         tmp_path,
         """
@@ -263,7 +246,6 @@ def test_parse_webhooks_drops_malformed(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_endpoint_for_scopes_to_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
     _write_cfg(
         tmp_path,
         """
@@ -330,7 +312,6 @@ def test_webhook_unknown_path_is_404(webhook_server) -> None:
 def test_webhook_unknown_agent_is_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A webhook referencing an unknown agent is an error, not an ack."""
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
     _write_cfg(
         tmp_path,
         """
@@ -406,7 +387,6 @@ def test_webhook_rejects_malformed_content_length(webhook_server, value: str) ->
 
 def test_webhook_limits_concurrent_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
     _write_cfg(
         tmp_path,
         """
@@ -485,4 +465,4 @@ def test_release_agent_closes_session_even_if_client_close_fails(tmp_path: Path)
     agent = Agent(BrokenClient(), build_tool_registry([]), session=session)
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(_release_agent(agent))
-    assert session._fh.closed
+    assert session.closed

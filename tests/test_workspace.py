@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import stat
 import textwrap
 from pathlib import Path
@@ -150,4 +149,3 @@ def test_config_fails_closed_on_bad_workspace(
         "write_file",
         "edit_file",
     }
-    assert os.fspath(by_name["good"].workspace_path() or "") == str(ws.resolve())

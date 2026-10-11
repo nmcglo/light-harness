@@ -4,7 +4,9 @@ The config file lives at ``$AGENT_RESPONDER_HOME/config.yaml`` (default home
 ``$HOME/.agent-responder``). It is optional. There are no per-field environment
 overrides: every endpoint setting comes from the file, which may pull secrets
 from the environment with ``$NAME`` or ``${NAME}`` (set variables are
-substituted, unset ones are left as-is).
+substituted, unset ones are left as-is; but a provider ``api_key`` or webhook
+``secret`` that references an unset variable is cleared / disabled with a warning,
+never used literally).
 
 Structure:
 
@@ -198,6 +200,14 @@ def _resolve_env_in_value(value: Any) -> Any:
     return value
 
 
+def unresolved_env_vars(value: str) -> list[str]:
+    """Names referenced as ``$NAME`` / ``${NAME}`` in ``value`` that are not set in
+    the environment. Meant for already-resolved config values, where any remaining
+    reference is one :func:`resolve_env` had to leave as-is."""
+    names = (m.group(1) or m.group(2) for m in _ENV_VAR_RE.finditer(value))
+    return sorted({n for n in names if n not in os.environ})
+
+
 def _parse_providers(raw: Any, warnings: list[str]) -> dict[str, Provider]:
     """Parse the ``providers:`` section. Malformed entries are skipped (and reported)."""
     if raw is None:
@@ -211,9 +221,25 @@ def _parse_providers(raw: Any, warnings: list[str]) -> dict[str, Provider]:
             warnings.append(f"providers.{name}: expected a mapping; entry ignored")
             continue
         try:
-            providers[str(name)] = Provider.model_validate(spec)
+            provider = Provider.model_validate(spec)
         except ValidationError as exc:
             warnings.append(f"providers.{name}: {_first_error(exc)}; entry ignored")
+            continue
+        missing_key = unresolved_env_vars(provider.api_key)
+        if missing_key:
+            # Fail closed: an unset "$NAME" must not be sent as the API key.
+            warnings.append(
+                f"providers.{name}: api_key references unset variable(s) "
+                f"{', '.join('$' + n for n in missing_key)}; api_key cleared"
+            )
+            provider = provider.model_copy(update={"api_key": ""})
+        missing_url = unresolved_env_vars(provider.base_url)
+        if missing_url:
+            warnings.append(
+                f"providers.{name}: base_url references unset variable(s) "
+                f"{', '.join('$' + n for n in missing_url)}"
+            )
+        providers[str(name)] = provider
     return providers
 
 
@@ -364,6 +390,14 @@ def _parse_webhooks(raw: Any, warnings: list[str]) -> list[WebhookConfig]:
             else:
                 warnings.append(f"{where} ({path}): 'secret' must be a string; entry ignored")
                 continue
+        if isinstance(secret, str) and (missing := unresolved_env_vars(secret)):
+            # Fail closed: keeping the literal "$NAME" would make the secret a known
+            # string, and dropping the secret would leave the webhook open.
+            warnings.append(
+                f"{where} ({path}): 'secret' references unset variable(s) "
+                f"{', '.join('$' + n for n in missing)}; entry ignored"
+            )
+            continue
         system_prompt = normalized.get("system_prompt")
         if system_prompt is not None:
             if not isinstance(system_prompt, str):
@@ -572,12 +606,14 @@ class Config:
 
     def system_prompt_for(self, agent: AgentConfig) -> str:
         """The system prompt for ``agent``: its persona's stored ``SOUL.md``
-        (under ``AGENT_RESPONDER_HOME``) if set, else the built-in default."""
-        if agent.persona and _valid_persona_name(agent.persona):
-            persona = self.personas.get(agent.persona)
-            if persona:
-                ensure_persona(agent.persona, persona.get(SOUL_FILENAME, ""))
-                soul = persona_soul_path(agent.persona).read_text(encoding="utf-8")
-                if soul.strip():
-                    return soul
+        (under ``AGENT_RESPONDER_HOME``) if set, else the built-in default.
+
+        Raises :class:`ValueError` if the agent's persona name is not a safe single
+        path segment (see :func:`persona_dir`)."""
+        persona = self.personas.get(agent.persona) if agent.persona else None
+        if persona and agent.persona:
+            ensure_persona(agent.persona, persona.get(SOUL_FILENAME, ""))
+            soul = persona_soul_path(agent.persona).read_text(encoding="utf-8")
+            if soul.strip():
+                return soul
         return DEFAULT_SYSTEM_PROMPT

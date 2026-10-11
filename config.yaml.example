@@ -2,8 +2,10 @@
 #
 # Copy to $AGENT_RESPONDER_HOME/config.yaml (default: ~/.agent-responder/config.yaml).
 # The file is optional. Precedence: config file > built-in default.
-# Values may reference env vars ($NAME or ${NAME}); set vars are substituted,
-# unset ones are left as-is.
+# Values may reference env vars ($NAME or ${NAME}); set vars are substituted and
+# unset ones are left as-is. Exception: a provider `api_key` or webhook `secret`
+# that references an unset var is cleared / disabled (with a warning), never used
+# literally.
 #
 # `providers:` defines the endpoints you can use. Each provider lists the models it
 # offers (the set you can switch among).
