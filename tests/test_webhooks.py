@@ -7,6 +7,7 @@ agent round-trip are exercised end to end without any network.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import textwrap
 import threading
@@ -378,3 +379,74 @@ def test_webhook_default_system_prompt_when_unset(webhook_server) -> None:
     assert status == 200
     _wait_for_prompts(client)
     assert client.system_prompts == ["sp"]
+
+
+def _raw_post(url: str, headers: str) -> int:
+    """Send only a header block (no body) and return the response status code."""
+    import socket
+
+    host, port = url.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as s:
+        s.sendall(f"POST /hooks/open HTTP/1.1\r\nHost: x\r\n{headers}\r\n\r\n".encode())
+        return int(s.recv(4096).split(b" ", 2)[1])
+
+
+def test_webhook_rejects_oversized_body_without_reading_it(webhook_server) -> None:
+    url, client = webhook_server
+    assert _raw_post(url, f"Content-Length: {10 * 1024 * 1024}") == 413
+    assert client.prompts == []
+
+
+@pytest.mark.parametrize("value", ["abc", "-5"])
+def test_webhook_rejects_malformed_content_length(webhook_server, value: str) -> None:
+    url, client = webhook_server
+    assert _raw_post(url, f"Content-Length: {value}") == 400
+    assert client.prompts == []
+
+
+def test_webhook_limits_concurrent_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    _clear_env(monkeypatch)
+    _write_cfg(
+        tmp_path,
+        """
+        agents:
+          - name: assistant
+            tools: []
+        webhooks:
+          - path: /hooks/open
+            agent: assistant
+        """,
+    )
+    gate = threading.Event()
+
+    class BlockingClient(CapturingClient):
+        async def chat(self, messages, tools=None) -> LLMResponse:
+            await asyncio.get_running_loop().run_in_executor(None, gate.wait, 5)
+            return await super().chat(messages, tools)
+
+    client = BlockingClient()
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        return Agent(client, build_tool_registry(agent_cfg.tools))
+
+    server = create_webhook_server(
+        Config.load(), "127.0.0.1", 0, agent_factory=factory, max_concurrent_runs=1
+    )
+    url = f"http://127.0.0.1:{server.server_address[1]}/hooks/open"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert _post(url, b"one")[0] == 200
+        assert _post(url, b"two")[0] == 429  # slot held by the first, still-running run
+        gate.set()
+        _wait_for_prompts(client, 1)
+        deadline = time.monotonic() + 5
+        while _post(url, b"three")[0] == 429:  # slot is freed once the run finishes
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        gate.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

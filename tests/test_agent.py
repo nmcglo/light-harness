@@ -60,3 +60,23 @@ def test_agent_stops_at_step_budget() -> None:
     agent = Agent(client=AlwaysCalls(), tools=default_registry(), max_steps=3)
     answer = asyncio.run(agent.run("keep going"))
     assert answer.startswith("Stopped")
+
+
+def test_tool_call_times_out_and_reports_error() -> None:
+    import asyncio
+
+    from agent_responder.tools import ToolRegistry
+
+    class SlowTool:
+        name = "slow"
+        description = "never returns in time"
+        parameters: dict = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: dict) -> str:
+            await asyncio.sleep(5)
+            return "done"
+
+    registry = ToolRegistry(timeout=0.05)
+    registry.register(SlowTool())
+    result = asyncio.run(registry.run("slow", {}))
+    assert result == "Error: tool 'slow' timed out after 0.05s."
