@@ -45,8 +45,10 @@ agents:
   - name: assistant
     provider: local
     model: qwen3.8:27b
-    # Optional opt-in list of built-in tools (echo, current_time, add).
-    # Omit for all built-in tools; [] for none; list names to enable a subset.
+    # Optional opt-in list of built-in tools (echo, current_time, add, and the file
+    # tools read_file/write_file/edit_file). Omit for all available; [] for none.
+    # The file tools need a `workspace` (absolute directory); without one they are
+    # unavailable even if listed. Everything the agent writes stays inside it.
     tools:
       - echo
       - add

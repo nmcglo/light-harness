@@ -162,9 +162,14 @@ def test_load_yaml_missing_returns_empty(tmp_path: Path) -> None:
     assert load_yaml(tmp_path / "nope.yaml") == {}
 
 
-def test_build_registry_default_all() -> None:
-    names = build_tool_registry(None).names()
-    assert set(names) == {t.name for t in builtin_tools()}
+def test_build_registry_default_excludes_file_tools_without_workspace(tmp_path: Path) -> None:
+    assert set(build_tool_registry(None).names()) == {"echo", "current_time", "add"}
+    with_ws = set(build_tool_registry(None, tmp_path).names())
+    assert with_ws == {t.name for t in builtin_tools(tmp_path)}
+    assert {"read_file", "write_file", "edit_file"} <= with_ws
+    # Naming a file tool without a workspace does not enable it.
+    assert build_tool_registry(["read_file", "echo"]).names() == ["echo"]
+    assert build_tool_registry(["read_file"], tmp_path).names() == ["read_file"]
 
 
 def test_build_registry_subset() -> None:
