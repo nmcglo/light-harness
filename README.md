@@ -75,8 +75,9 @@ The file is sectioned:
 - `interaction:` — names which agent each interaction uses; `chat.agent` is
   the agent the `agent chat` loop runs.
 - `webhooks:` — names HTTP paths that trigger a specific agent. Each entry has a
-  `path`, an `agent` (a name under `agents:`), and an optional `secret` that,
-  when set, requires `Authorization: Bearer <secret>`. Served by `agent webhooks`.
+  `path`, an `agent` (a name under `agents:`), an optional `secret` that, when
+  set, requires `Authorization: Bearer <secret>`, and an optional `system_prompt`
+  that overrides the agent's default system prompt. Served by `agent webhooks`.
 
 `Config.active_agent()` resolves the agent the loop uses (the one named by
 `interaction.chat.agent`, else the first agent, else a default), and
@@ -112,6 +113,8 @@ Each POST to a configured `path` runs that webhook's `agent` with the parsed
 request body (JSON is re-serialized; non-JSON is passed through as text) and
 returns the agent's answer. A webhook with a `secret` requires the request to
 carry `Authorization: Bearer <secret>`; others are unauthenticated.
+A webhook may carry an optional `system_prompt`, which overrides the agent's
+default (persona-based) system prompt for that webhook's runs.
 
 ```sh
 uv run agent webhooks                # http://127.0.0.1:8787/

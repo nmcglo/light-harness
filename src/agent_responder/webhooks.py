@@ -63,12 +63,15 @@ def _bearer_matches(secret: str | None, authorization: str | None) -> bool:
     return hmac.compare_digest(_bearer_token(authorization), secret)
 
 
-def default_agent_factory(config: Config, agent_cfg: AgentConfig) -> Agent:
+def default_agent_factory(
+    config: Config, agent_cfg: AgentConfig, webhook: WebhookConfig
+) -> Agent:
     """Build the real agent for a webhook's configured agent (client + tools +
-    a persona session log under the agent's persona home)."""
+    a persona session log under the agent's persona home). The webhook's own
+    ``system_prompt`` (when set) overrides the agent's persona-based prompt."""
     settings = config.endpoint_for(agent_cfg)
     registry = build_tool_registry(agent_cfg.tools)
-    system_prompt = config.system_prompt_for(agent_cfg)
+    system_prompt = webhook.system_prompt or config.system_prompt_for(agent_cfg)
     persona_name = agent_cfg.persona or agent_cfg.name
     ensure_persona(persona_name)
     session = SessionLog(
@@ -156,10 +159,10 @@ def create_webhook_server(
     config: Config,
     host: str,
     port: int,
-    agent_factory: Callable[[Config, AgentConfig], Agent] | None = None,
+    agent_factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] | None = None,
 ) -> ThreadingHTTPServer:
     """Build (but do not start) the webhook server for ``config``."""
-    factory: Callable[[Config, AgentConfig], Agent] = (
+    factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] = (
         default_agent_factory if agent_factory is None else agent_factory
     )
     bound_config = config
@@ -173,7 +176,7 @@ def create_webhook_server(
                 raise LookupError(
                     f"webhook '{webhook.path}' references unknown agent '{webhook.agent}'"
                 )
-            return factory(self.config, agent_cfg)
+            return factory(self.config, agent_cfg, webhook)
 
     return ThreadingHTTPServer((host, port), BoundHandler)
 

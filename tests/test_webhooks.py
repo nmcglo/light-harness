@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from agent_responder.agent import Agent
-from agent_responder.config import AgentConfig, Config
+from agent_responder.config import AgentConfig, Config, WebhookConfig
 from agent_responder.llm import ChatMessage, LLMResponse
 from agent_responder.tools import build_tool_registry
 from agent_responder.webhooks import (
@@ -48,15 +48,18 @@ def _write_cfg(home: Path, text: str) -> None:
 
 
 class CapturingClient:
-    """A fake LLM client: records each user prompt and returns a fixed answer."""
+    """A fake LLM client: records user prompts and the system prompt; fixed answer."""
 
     def __init__(self, answer: str = "handled") -> None:
         self.answer = answer
         self.prompts: list[str] = []
+        self.system_prompts: list[str] = []
 
     async def chat(self, messages, tools=None) -> LLMResponse:
         for message in messages:
-            if message.role == "user":
+            if message.role == "system":
+                self.system_prompts.append(message.content)
+            elif message.role == "user":
                 self.prompts.append(message.content)
         return LLMResponse(
             message=ChatMessage(role="assistant", content=self.answer), tool_calls=[]
@@ -85,13 +88,20 @@ def webhook_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
           - path: /hooks/secret
             agent: assistant
             secret: topsecret
+          - path: /hooks/custom
+            agent: assistant
+            system_prompt: You are a deploy bot.
         """,
     )
     config = Config.load()
     client = CapturingClient()
 
-    def factory(cfg: Config, agent_cfg: AgentConfig) -> Agent:
-        return Agent(client, build_tool_registry(agent_cfg.tools), system_prompt="sp")
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        return Agent(
+            client,
+            build_tool_registry(agent_cfg.tools),
+            system_prompt=webhook.system_prompt or "sp",
+        )
 
     server = create_webhook_server(config, "127.0.0.1", 0, agent_factory=factory)
     port = server.server_address[1]
@@ -172,14 +182,29 @@ def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyP
             secret: tok
           - path: /hooks/plain
             agent: assistant
+          - path: /hooks/custom
+            agent: assistant
+            system_prompt: Custom prompt here
+          - path: /hooks/emptyprompt
+            agent: assistant
+            system_prompt: "   "
         """,
     )
     config = Config.load()
-    assert [w.path for w in config.webhooks] == ["/hooks/deploy", "/hooks/plain"]
+    assert [w.path for w in config.webhooks] == [
+        "/hooks/deploy",
+        "/hooks/plain",
+        "/hooks/custom",
+        "/hooks/emptyprompt",
+    ]
     deploy = config.webhook_by_path("/hooks/deploy")
     assert deploy is not None and deploy.secret == "tok"
     plain = config.webhook_by_path("/hooks/plain")
     assert plain is not None and plain.secret is None
+    custom = config.webhook_by_path("/hooks/custom")
+    assert custom is not None and custom.system_prompt == "Custom prompt here"
+    empty = config.webhook_by_path("/hooks/emptyprompt")
+    assert empty is not None and empty.system_prompt is None
     assert config.webhook_by_path("/nope") is None
     assert config.get_agent("assistant") is not None
 
@@ -193,6 +218,12 @@ def test_parse_webhooks_drops_malformed(tmp_path: Path, monkeypatch: pytest.Monk
         webhooks:
           - path: /hooks/ok
             agent: assistant
+          - path: /hooks/sp
+            agent: assistant
+            system_prompt: Custom
+          - path: /hooks/badsp
+            agent: assistant
+            system_prompt: [1, 2]
           - path: not-a-path
             agent: assistant
           - agent: assistant
@@ -201,7 +232,8 @@ def test_parse_webhooks_drops_malformed(tmp_path: Path, monkeypatch: pytest.Monk
         """,
     )
     config = Config.load()
-    assert [w.path for w in config.webhooks] == ["/hooks/ok"]
+    assert [w.path for w in config.webhooks] == ["/hooks/ok", "/hooks/sp"]
+    assert config.webhook_by_path("/hooks/sp").system_prompt == "Custom"
 
 
 def test_endpoint_for_scopes_to_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,3 +337,20 @@ def test_webhook_get_is_405(webhook_server) -> None:
     base, _ = webhook_server
     status, _ = _get(base + "/hooks/open")
     assert status == 405
+
+
+def test_webhook_custom_system_prompt_reaches_agent(webhook_server) -> None:
+    base, client = webhook_server
+    status, _ = _post(base + "/hooks/custom", b'{"a": 1}')
+    assert status == 200
+    _wait_for_prompts(client)
+    assert client.system_prompts == ["You are a deploy bot."]
+    assert len(client.prompts) == 1
+
+
+def test_webhook_default_system_prompt_when_unset(webhook_server) -> None:
+    base, client = webhook_server
+    status, _ = _post(base + "/hooks/open", b'{"a": 1}')
+    assert status == 200
+    _wait_for_prompts(client)
+    assert client.system_prompts == ["sp"]

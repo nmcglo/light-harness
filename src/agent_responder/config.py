@@ -219,8 +219,9 @@ def _parse_interaction(raw: Any) -> Interaction:
 
 def _parse_webhooks(raw: Any) -> list[WebhookConfig]:
     """Parse the ``webhooks:`` section. Each entry needs a ``path`` (a string
-    starting with ``/``); ``agent`` names the handling agent and ``secret``
-    (optional) requires ``Authorization: Bearer <secret>``. Malformed or
+    starting with ``/``); ``agent`` names the handling agent, ``secret``
+    (optional) requires ``Authorization: Bearer <secret>``, and ``system_prompt``
+    (optional) overrides the agent's default system prompt. Malformed or
     duplicate-path entries are dropped."""
     if not isinstance(raw, list):
         return []
@@ -239,6 +240,12 @@ def _parse_webhooks(raw: Any) -> list[WebhookConfig]:
                 normalized["secret"] = str(secret)
             else:
                 continue
+        system_prompt = normalized.get("system_prompt")
+        if system_prompt is not None:
+            if not isinstance(system_prompt, str):
+                continue
+            if not system_prompt.strip():
+                normalized["system_prompt"] = None
         try:
             webhook = WebhookConfig.model_validate(normalized)
         except ValidationError:
@@ -299,6 +306,8 @@ class WebhookConfig(BaseModel):
     """A configured webhook: an HTTP ``path`` that triggers a specific ``agent``.
 
     When ``secret`` is set, requests must carry ``Authorization: Bearer <secret>``.
+    When ``system_prompt`` is set, the agent runs with it instead of the agent's
+    default (persona-based) system prompt.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -306,6 +315,7 @@ class WebhookConfig(BaseModel):
     path: str
     agent: str = DEFAULT_AGENT_NAME
     secret: str | None = None
+    system_prompt: str | None = None
 
 
 class Settings(BaseModel):
