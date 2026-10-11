@@ -1,21 +1,21 @@
-"""Configuration: field defaults < config.yaml < environment variables.
+"""Configuration: built-in defaults < config.yaml.
 
 The config file lives at ``$AGENT_RESPONDER_HOME/config.yaml`` (default home
-``$HOME/.agent-responder``). It is optional. Precedence for every value is:
-environment variable > config file > built-in default.
-
-Config file values may reference environment variables with ``$NAME`` or
-``${NAME}``; set variables are substituted, unset ones are left as-is.
+``$HOME/.agent-responder``). It is optional. There are no per-field environment
+overrides: every endpoint setting comes from the file, which may pull secrets
+from the environment with ``$NAME`` or ``${NAME}`` (set variables are
+substituted, unset ones are left as-is).
 
 Structure:
 
 - ``providers:`` maps a name to an endpoint (``base_url``, ``api_key``,
   ``timeout``) plus the ``models`` it offers -- the set you can switch among.
-- ``agent:`` names the ``provider`` and ``model`` the loop uses, plus the
-  ``tools`` it may call (opt-in).
+- ``agents:`` names each agent's ``provider`` and ``model``, plus the ``tools``
+  it may call (opt-in) and its ``persona``.
+- ``personas:``, ``interaction:``, ``webhooks:`` -- see the README.
 
-``Config.endpoint()`` resolves those into the effective :class:`Settings` the
-agent loop talks to. New features add their own section + settings model to
+``Config.endpoint_for()`` resolves an agent into the effective :class:`Settings`
+its loop talks to. New features add their own section + settings model to
 ``Config``.
 """
 
@@ -30,7 +30,6 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 CONFIG_FILENAME = "config.yaml"
-ENV_PREFIX = "AGENT"
 
 # Single source of truth for built-in defaults, shared by Provider, AgentConfig,
 # and Settings so they can't drift apart.
@@ -196,15 +195,6 @@ def _resolve_env_in_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _resolve_env_in_value(item) for key, item in value.items()}
     return value
-
-
-def _env_value(field: str) -> str | None:
-    """Read the env var for ``field`` (unset or empty -> ``None``). ``api_key``
-    additionally falls back to ``OPENAI_API_KEY``."""
-    value = os.environ.get(f"{ENV_PREFIX}_{field.upper()}")
-    if field == "api_key":
-        value = value or os.environ.get("OPENAI_API_KEY")
-    return value if value else None
 
 
 def _parse_providers(raw: Any, warnings: list[str]) -> dict[str, Provider]:
@@ -421,16 +411,15 @@ class Settings(BaseModel):
     timeout: float = Field(default=DEFAULT_TIMEOUT, gt=0)
 
     @classmethod
-    def from_sources(cls, file_values: dict[str, Any]) -> Settings:
-        """Apply precedence: env var > file value > field default."""
-        values: dict[str, Any] = {}
-        for field in cls.model_fields:
-            env_value = _env_value(field)
-            if env_value is not None:
-                values[field] = env_value
-            elif file_values.get(field) not in (None, ""):
-                values[field] = file_values[field]
-        return cls(**values)
+    def from_values(cls, values: dict[str, Any]) -> Settings:
+        """Build settings from ``values``; unset or empty values use the field default."""
+        return cls(
+            **{
+                field: values[field]
+                for field in cls.model_fields
+                if values.get(field) not in (None, "")
+            }
+        )
 
 
 class Config:
@@ -507,16 +496,19 @@ class Config:
         return self.endpoint_for(self.active_agent())
 
     def endpoint_for(self, agent: AgentConfig) -> Settings:
-        """Resolve the effective endpoint for ``agent``: env > agent/provider > default."""
-        provider_name = _env_value("provider") or agent.provider
-        provider = self.providers.get(provider_name) or Provider()
-        file_values = {
-            "model": agent.model,
-            "base_url": provider.base_url,
-            "api_key": provider.api_key,
-            "timeout": provider.timeout,
-        }
-        return Settings.from_sources(file_values)
+        """Resolve the effective endpoint for ``agent`` from its provider and model.
+
+        Each agent resolves independently, so agents on different providers never
+        share a base URL or API key."""
+        provider = self.providers.get(agent.provider) or Provider()
+        return Settings.from_values(
+            {
+                "model": agent.model,
+                "base_url": provider.base_url,
+                "api_key": provider.api_key,
+                "timeout": provider.timeout,
+            }
+        )
 
     def webhook_by_path(self, path: str) -> WebhookConfig | None:
         """The webhook whose ``path`` matches, or ``None``."""

@@ -96,7 +96,8 @@ def chat(
         settings.base_url = base_url
     if not settings.api_key:
         console.print(
-            "[red]No API key found.[/red] Set AGENT_API_KEY (or OPENAI_API_KEY) and try again."
+            "[red]No API key found.[/red] Set `api_key` on the agent's provider in "
+            "config.yaml (e.g. `api_key: $MY_KEY`)."
         )
         raise typer.Exit(code=1)
 

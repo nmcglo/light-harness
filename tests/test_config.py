@@ -87,26 +87,20 @@ def test_switching_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     )
 
 
-def test_env_provider_and_model_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_endpoint_ignores_global_env_and_scopes_credentials_per_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _write_cfg(tmp_path, CFG)
     monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
     _clear_env(monkeypatch)
-    monkeypatch.setenv("AGENT_PROVIDER", "openai")
-    monkeypatch.setenv("AGENT_MODEL", "gpt-4o")
-    e = Config.load().endpoint()
-    assert e.model == "gpt-4o"  # env model override
-    assert e.base_url == "https://api.openai.com/v1"  # env switched provider
-    assert e.api_key == "openai-key"
-
-
-def test_env_field_override_beats_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, CFG)
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("AGENT_BASE_URL", "http://env/v1")
-    e = Config.load().endpoint()
-    assert e.base_url == "http://env/v1"  # env wins over provider base_url
-    assert e.api_key == "local-key"  # no env -> provider value
+    for var in ("AGENT_PROVIDER", "AGENT_MODEL", "AGENT_BASE_URL", "AGENT_API_KEY"):
+        monkeypatch.setenv(var, "from-env")
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai-key")
+    config = Config.load()
+    a = config.endpoint_for(AgentConfig(name="a", provider="local", model="m1"))
+    b = config.endpoint_for(AgentConfig(name="b", provider="openai", model="m2"))
+    assert (a.model, a.base_url, a.api_key) == ("m1", "http://local/v1", "local-key")
+    assert (b.model, b.base_url, b.api_key) == ("m2", "https://api.openai.com/v1", "openai-key")
 
 
 def test_defaults_when_no_file_or_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,13 +113,6 @@ def test_defaults_when_no_file_or_env(tmp_path: Path, monkeypatch: pytest.Monkey
         "",
         60.0,
     )
-
-
-def test_openai_api_key_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_API_KEY", "fallback-key")
-    assert Config.load().endpoint().api_key == "fallback-key"
 
 
 def test_missing_provider_uses_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -266,18 +253,6 @@ def test_file_env_value_in_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     _clear_env(monkeypatch)
     monkeypatch.setenv("MODEL_NAME", "big-model")
     assert Config.load().providers["local"].models == ["big-model"]
-
-
-def test_env_override_beats_file_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(
-        tmp_path,
-        "providers:\n  local:\n    api_key: $MY_API_KEY\nagents:\n  - name: a\n    model: m\n",
-    )
-    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("MY_API_KEY", "from-file-env")
-    monkeypatch.setenv("AGENT_API_KEY", "from-env-override")
-    assert Config.load().endpoint().api_key == "from-env-override"
 
 
 def test_active_agent_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
