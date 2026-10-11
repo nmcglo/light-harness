@@ -450,3 +450,39 @@ def test_webhook_limits_concurrent_runs(tmp_path: Path, monkeypatch: pytest.Monk
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "GET"])
+def test_non_post_methods_get_405_with_allow(webhook_server, method: str) -> None:
+    import http.client
+
+    url, client = webhook_server
+    conn = http.client.HTTPConnection(url.removeprefix("http://"), timeout=5)
+    try:
+        conn.request(method, "/hooks/open")
+        response = conn.getresponse()
+        body = response.read()
+        assert response.status == 405
+        assert response.getheader("Allow") == "POST"
+        if method == "HEAD":
+            assert body == b""  # headers only
+        else:
+            assert json.loads(body)["message"] == "webhooks accept POST only"
+    finally:
+        conn.close()
+    assert client.prompts == []
+
+
+def test_release_agent_closes_session_even_if_client_close_fails(tmp_path: Path) -> None:
+    from agent_responder.sessions import SessionLog
+    from agent_responder.webhooks import _release_agent
+
+    class BrokenClient(CapturingClient):
+        async def close(self) -> None:
+            raise RuntimeError("boom")
+
+    session = SessionLog(tmp_path, meta={})
+    agent = Agent(BrokenClient(), build_tool_registry([]), session=session)
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(_release_agent(agent))
+    assert session._fh.closed

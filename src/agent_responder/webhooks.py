@@ -29,6 +29,7 @@ from .tools import build_tool_registry
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_MAX_CONCURRENT_RUNS = 4
+REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def parse_webhook_body(body: bytes) -> str:
@@ -65,6 +66,16 @@ def _bearer_matches(secret: str | None, authorization: str | None) -> bool:
     return hmac.compare_digest(_bearer_token(authorization), secret)
 
 
+async def _release_agent(agent: Agent) -> None:
+    """Close an agent's HTTP client and session log; closing the session is
+    attempted even if closing the client fails."""
+    try:
+        await agent.client.close()
+    finally:
+        if agent.session is not None:
+            agent.session.close()
+
+
 def default_agent_factory(
     config: Config, agent_cfg: AgentConfig, webhook: WebhookConfig
 ) -> Agent:
@@ -85,12 +96,16 @@ def default_agent_factory(
             "source": "webhook",
         },
     )
-    return Agent(
-        client=OpenAICompatibleClient(settings),
-        tools=registry,
-        system_prompt=system_prompt,
-        session=session,
-    )
+    try:
+        return Agent(
+            client=OpenAICompatibleClient(settings),
+            tools=registry,
+            system_prompt=system_prompt,
+            session=session,
+        )
+    except BaseException:
+        session.close()  # don't leak the open log file if construction fails
+        raise
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -99,8 +114,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     run_slots: threading.BoundedSemaphore
 
-    def do_GET(self) -> None:
-        self._send_json(405, {"message": "webhooks accept POST only"})
+    # Per-connection socket timeout: a client that stalls mid-request can't hold a
+    # handler thread forever.
+    timeout = REQUEST_TIMEOUT_SECONDS
+
+    def _method_not_allowed(self) -> None:
+        self._send_json(
+            405, {"message": "webhooks accept POST only"}, headers={"Allow": "POST"}
+        )
+
+    do_GET = do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _method_not_allowed
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
@@ -123,11 +146,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
         # Ack immediately: confirm the agent can start, then run it in the
         # background so the sender isn't held open while the model works.
+        agent: Agent | None = None
         try:
             agent = self._make_agent(webhook)
             self._spawn(agent, body)
         except Exception as exc:  # noqa: BLE001 - report the failure to the caller
             self.run_slots.release()
+            if agent is not None:  # built, but the worker never started
+                asyncio.run(_release_agent(agent))
             self._send_json(500, {"message": f"{type(exc).__name__}: {exc}"})
             return
         self._send_json(200, {"agent": webhook.agent, "message": "OK"})
@@ -152,21 +178,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             return await agent.run(parse_webhook_body(body))
         finally:
-            await agent.client.close()
-            if agent.session is not None:
-                agent.session.close()
+            await _release_agent(agent)
 
     def _make_agent(self, webhook: WebhookConfig) -> Agent:
         """Build the agent for ``webhook`` (overridden per server)."""
         raise NotImplementedError
 
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_json(
+        self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":  # HEAD responses carry headers only
+            self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
         """Keep the console clean while the server runs."""
