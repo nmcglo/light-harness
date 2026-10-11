@@ -181,6 +181,28 @@ def create_webhook_server(
     return ThreadingHTTPServer((host, port), BoundHandler)
 
 
+def unauthenticated_webhooks(config: Config) -> list[WebhookConfig]:
+    """Webhooks that accept requests without credentials (no or empty ``secret``).
+
+    An empty secret is included because ``_bearer_matches`` accepts a request
+    with no bearer token against it.
+    """
+    return [w for w in config.webhooks if not w.secret]
+
+
+def unauthenticated_warning(config: Config) -> str | None:
+    """A warning naming how many webhooks are unauthenticated, or ``None``."""
+    open_hooks = unauthenticated_webhooks(config)
+    if not open_hooks:
+        return None
+    paths = ", ".join(w.path for w in open_hooks)
+    return (
+        f"WARNING: {len(open_hooks)} of {len(config.webhooks)} webhook(s) are "
+        f"unauthenticated (no secret) and can be triggered by anyone who can reach "
+        f"this server: {paths}"
+    )
+
+
 def serve_webhooks(
     config: Config,
     host: str = DEFAULT_HOST,
@@ -189,6 +211,9 @@ def serve_webhooks(
     """Run the webhook server until interrupted (blocking)."""
     server = create_webhook_server(config, host, port)
     print(f"Serving {len(config.webhooks)} webhook(s) at http://{host}:{port}/")
+    warning = unauthenticated_warning(config)
+    if warning:
+        print(warning, file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
