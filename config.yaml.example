@@ -20,8 +20,9 @@
 # the `agent chat` loop runs.
 #
 # `webhooks:` names HTTP paths that trigger a specific agent. Each entry has a
-# `path`, an `agent` (a name under `agents:`), and an optional `secret` that,
-# when set, requires `Authorization: Bearer <secret>`. `agent webhooks` serves them.
+# `path`, an `agent` (a name under `agents:`), an optional `secret` that, when
+# set, requires `Authorization: Bearer <secret>`, and an optional `system_prompt`
+# that overrides the agent's default system prompt. `agent webhooks` serves them.
 #
 # Env overrides: AGENT_PROVIDER, AGENT_MODEL, AGENT_BASE_URL, AGENT_API_KEY
 # (or OPENAI_API_KEY), AGENT_TIMEOUT. AGENT_RESPONDER_HOME overrides the home dir.
@@ -68,10 +69,12 @@ interaction:
     agent: assistant
 
 webhooks:
-  # Each entry: a `path`, the `agent` that handles it (a name under `agents:`), and
-  # an optional `secret` that requires `Authorization: Bearer <secret>`.
+  # Each entry: a `path`, the `agent` that handles it (a name under `agents:`), an
+  # optional `secret` (requires `Authorization: Bearer <secret>`), and an optional
+  # `system_prompt` that overrides the agent's default system prompt.
   - path: /hooks/deploy
     agent: assistant
     secret: $DEPLOY_WEBHOOK_SECRET
   - path: /hooks/issues
     agent: terse
+    system_prompt: You are a terse issue-triage bot.
