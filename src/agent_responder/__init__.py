@@ -1,4 +1,5 @@
-"""agent_responder -- a uv-friendly Python scaffold for an agentic harness.
+"""agent_responder -- a small agentic harness that runs LLM agents in response to
+triggers (a chat prompt, or an HTTP webhook).
 
 The core pieces:
 
@@ -7,9 +8,13 @@ The core pieces:
   tools or the step budget is exhausted.
 - :class:`LLMClient` (protocol) is the pluggable model boundary.
   :class:`OpenAICompatibleClient` is a default implementation that talks to any
-  OpenAI-compatible ``/chat/completions`` endpoint.
-- :class:`ToolRegistry` holds callable tools the model can invoke.
+  OpenAI-compatible ``/chat/completions`` endpoint, retrying transient failures.
+- :class:`ToolRegistry` holds callable tools the model can invoke, validating
+  their arguments and bounding each call's run time.
 - :class:`Conversation` keeps the multi-turn message history.
+- :class:`Config` loads ``config.yaml`` (providers, agents, personas, interaction,
+  webhooks); :class:`SessionLog` records each session as JSONL under the agent's
+  persona directory; :func:`serve_webhooks` serves the configured webhooks.
 """
 
 from __future__ import annotations

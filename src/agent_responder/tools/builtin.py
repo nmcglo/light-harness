@@ -1,7 +1,10 @@
-"""Built-in example tools.
+"""Built-in tools.
 
-These are intentionally trivial and demonstrate the :class:`Tool` interface.
-Add your own tools the same way and register them in a :class:`ToolRegistry`.
+``echo``, ``current_time`` and ``add`` are trivial examples of the :class:`Tool`
+interface. ``read_file``, ``write_file`` and ``edit_file`` do real work on disk and
+are confined to an agent's workspace directory (see :mod:`.workspace`); they exist
+only when a workspace is configured. Add your own tools the same way and register
+them in a :class:`ToolRegistry`.
 """
 
 from __future__ import annotations

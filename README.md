@@ -155,7 +155,12 @@ uv run agent webhooks --host 0.0.0.0 # expose beyond localhost
 ## Extending it
 
 - **Add a tool**: implement `name` / `description` / `parameters` (JSON Schema)
-  / `async run(**kwargs) -> str`, then `registry.register(MyTool())`.
+  / `async run(arguments: dict[str, Any]) -> str` (the arguments arrive as one
+  dict), then `registry.register(MyTool())`. Before `run` is called, the registry
+  checks the arguments against `parameters` (required keys and scalar types) and
+  returns a descriptive error to the model on a mismatch; each call is also limited
+  to 60 seconds. Tools registered this way are used programmatically -- the
+  `tools:` config list only selects among the built-ins.
 - **Use a different model**: implement the `LLMClient` protocol
   (`async chat(...) -> LLMResponse`, `async close()`) and pass it to `Agent`.
   The default client talks to any OpenAI-compatible endpoint; set it per
