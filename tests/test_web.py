@@ -8,6 +8,7 @@ end to end.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -34,12 +35,38 @@ def web_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     thread.join(timeout=5)
 
 
-def _get(url: str) -> tuple[int, str]:
+def _token(url: str) -> str:
+    """The API token a real browser would read from the served page."""
+    base = url.split("/api/", 1)[0]
+    with urllib.request.urlopen(base + "/", timeout=5) as r:
+        match = re.search(r'name="agent-token" content="([^"]+)"', r.read().decode("utf-8"))
+    assert match
+    return match.group(1)
+
+
+def _request(
+    url: str,
+    method: str = "GET",
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    token: bool = True,
+) -> tuple[int, dict[str, str], str]:
+    """One request -> (status, response headers, body). Sends the page token on
+    ``/api/`` URLs unless ``token`` is False."""
+    headers = dict(headers or {})
+    if token and "/api/" in url:
+        headers["X-Agent-Token"] = _token(url)
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(url, timeout=5) as r:
-            return r.status, r.read().decode("utf-8")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, dict(r.headers), r.read().decode("utf-8")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8")
+        return e.code, dict(e.headers), e.read().decode("utf-8")
+
+
+def _get(url: str) -> tuple[int, str]:
+    status, _, body = _request(url)
+    return status, body
 
 
 def _get_json(url: str) -> tuple[int, dict]:
@@ -53,13 +80,71 @@ def _post(url: str, payload: object) -> tuple[int, dict]:
         if isinstance(payload, str)
         else json.dumps(payload).encode("utf-8")
     )
-    headers = {"Content-Type": "application/json"}
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode("utf-8"))
+    status, _, body = _request(url, "POST", data, {"Content-Type": "application/json"})
+    return status, json.loads(body)
+
+
+def test_api_requires_token(web_base: str) -> None:
+    for method, data in (("GET", None), ("POST", b"{}")):
+        status, _, body = _request(web_base + "/api/config", method, data, token=False)
+        assert status == 401, method
+        assert "X-Agent-Token" in body
+    status, _, _ = _request(
+        web_base + "/api/config", headers={"X-Agent-Token": "wrong"}, token=False
+    )
+    assert status == 401
+
+
+def test_cors_defaults_to_wildcard_on_api_but_not_on_page(web_base: str) -> None:
+    _, headers, _ = _request(web_base + "/api/tools")
+    assert headers["Access-Control-Allow-Origin"] == "*"
+    # 401s are readable cross-origin too, so a browser client sees the reason.
+    _, headers, _ = _request(web_base + "/api/tools", token=False)
+    assert headers["Access-Control-Allow-Origin"] == "*"
+    # The page embeds the token, so it must not be readable cross-origin.
+    _, headers, _ = _request(web_base + "/")
+    assert "Access-Control-Allow-Origin" not in headers
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_cors_preflight(web_base: str) -> None:
+    status, headers, _ = _request(
+        web_base + "/api/config",
+        "OPTIONS",
+        headers={"Origin": "http://other.example", "Access-Control-Request-Method": "POST"},
+        token=False,
+    )
+    assert status == 204
+    assert headers["Access-Control-Allow-Origin"] == "*"
+    assert "X-Agent-Token" in headers["Access-Control-Allow-Headers"]
+    assert "POST" in headers["Access-Control-Allow-Methods"]
+
+
+def test_cors_origin_configurable_and_disableable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_RESPONDER_HOME", str(tmp_path))
+    for configured, expected in (("http://ui.example", "http://ui.example"), ("", None)):
+        server = create_server("127.0.0.1", 0, cors_origin=configured)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/tools"
+            _, headers, _ = _request(url)
+            assert headers.get("Access-Control-Allow-Origin") == expected
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
+def test_rejects_unexpected_host_header(web_base: str) -> None:
+    # DNS rebinding: attacker's name resolves to 127.0.0.1 but keeps its own Host.
+    for path in ("/", "/api/tools"):
+        status, _, _ = _request(web_base + path, headers={"Host": "evil.example"})
+        assert status == 403, path
+    status, _, _ = _request(web_base + "/api/tools", headers={"Host": "localhost:8765"})
+    assert status == 200
 
 
 def test_serves_html_page(web_base: str) -> None:
