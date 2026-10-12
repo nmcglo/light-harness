@@ -1,0 +1,259 @@
+# Known issues
+
+Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
+behaviour was changed.
+
+**Baseline checks**
+
+| Check | Result |
+| --- | --- |
+| `uv run ruff check .` | clean |
+| `uv run pytest -q` | 103 passed |
+| `uv run mypy` (documented command) | clean, 15 source files |
+| `uv run mypy tests` | **31 errors in 4 test files** |
+
+`pyproject.toml:45-49` sets `strict = true` with `packages = ["light_harness"]`, so the
+documented `uv run mypy` never sees `tests/`. The strict posture over the test suite is
+accidental rather than enforced (untyped defs, unannotated fixture parameters, bare `dict`,
+`Optional` attribute access). Add an explicit `[[tool.mypy.overrides]] module = ["tests.*"]`
+block, or annotate the fakes (`CapturingClient`, `FakeClient`, `AlwaysCalls`, `BrokenClient`)
+so they satisfy `LLMClient` by declaration instead of by shape.
+
+Severity: **high** = silent data loss or wrong result on a normal path; **medium** = reachable
+failure under realistic conditions; **low** = polish or platform-conditional.
+Verification: *verified* = reproduced against the live code; *inference* = read from the code.
+
+## Index
+
+| ID | Area | Issue | Severity | Verified |
+| --- | --- | --- | --- | --- |
+| W1 | `web.py` | Empty/odd POST body wipes the managed config sections | high | yes |
+| T1 | `httputil.py` | Chunked bodies read as empty; body not drained before responding | high | yes |
+| A1 | `web.py`, `webhooks.py` | Non-ASCII token/secret crashes the handler instead of 401 | high | yes |
+| E1 | `edit_diff.py` | Whitespace-only `old_text` "succeeds" and writes at byte 0 | high | yes |
+| B1 | `tools/builtin.py` | `read_file` `limit` unvalidated (negative → wrong content + bogus hint) | medium | yes |
+| S1 | `tools/workspace.py` | New files forced `0o644`, umask ignored | medium | yes |
+| S2 | `tools/workspace.py` | `path="."` puts the temp file outside the workspace | medium | yes |
+| P1 | `config.py` | Persona `SOUL.md` edits through the web UI have no effect | medium | yes |
+| S3 | `web.py` | CRLF injection through `--cors-origin`; secrets served without `Cache-Control` | medium | yes |
+| D1 | `README.md`, `webhooks.py` | Docs say POST returns the agent's answer; code acks immediately | medium | yes |
+| C1 | `tools/__init__.py` | 60 s tool timeout cannot interrupt sync-blocking tools | medium | yes |
+| B2 | `tools/builtin.py` | Non-string `edit_file` entries silently dropped | low | yes |
+| C2 | `tools/builtin.py` | No locking on read-modify-write | medium | inference |
+| L1 | `llm.py` | Unguarded response shape (`choices[0]`, malformed tool_call) | medium | inference |
+| E2 | `edit_diff.py` | No-op guard can never fire in fuzzy mode | medium | inference |
+| S4 | `tools/workspace.py` | Deny check is lexical (case-insensitive FS) and blind to hardlinks | low | inference |
+| W2 | `web.py` | Unguarded `read_text`; inconsistent `ConfigError` handling | low | inference |
+| X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
+
+## High severity
+
+### W1 — `POST /api/config` can silently wipe the config
+
+`web.py:795-838` (`do_POST`): `payload = json.loads(raw) if raw else {}` (`808`), then `_build_config_dict(payload,
+current)` merges only the sections the payload contains. A `POST` with an empty body returns
+`200` and rewrites `config.yaml` containing only the carried-over *unmanaged* keys — `providers`,
+`agents`, `personas`, `interaction` are gone. Verified: posting `b""` to a live server left a file
+with just `webhooks:`.
+
+Same class of loss on any save through the UI:
+
+- comments in `config.yaml` are destroyed (whole-file rewrite), including the commented template
+  the README tells users to copy;
+- non-string persona values and shape-mismatched sections are dropped by the parsers;
+- a blank persona name yields `personas: {"": ...}`;
+- a section emptied through the UI form is written as an empty section.
+
+Fix direction: reject payloads that are not an object, and preserve sections that the client did
+not send rather than treating "absent" as "empty".
+
+### T1 — `Transfer-Encoding: chunked` is not handled
+
+`httputil.py:26-34` reads `Content-Length` only; `if header is None or not header.strip(): return b""`.
+A chunked sender (some HTTP clients, proxies) produces an **empty prompt** and the handler responds
+before consuming the body. Verified against the live webhook server: the agent received `''`, and on
+a reused connection the follow-up request was lost — the server closed the socket without answering.
+The oversized-body path correctly sets `close_connection = True` (`web.py:803-804`, `webhooks.py:139-140`)
+precisely because the body is not drained; the chunked path has no equivalent guard, and the 404 path never
+consumes the body at all.
+
+Fix direction: reject or decode `Transfer-Encoding: chunked`, and drain (or close) whenever the body
+is not fully read.
+
+### A1 — Non-ASCII token/secret crashes instead of 401
+
+`hmac.compare_digest` accepts bytes-like objects or ASCII-only strings. `http.server` decodes headers
+as iso-8859-1, so `X-Agent-Token: café` raises `TypeError` at `web.py:760` — both call sites
+(`webhooks.py:66`) are outside any `try`, so `handle_one_request` prints a traceback
+and drops the connection with **no response at all**. A config `secret` containing non-ASCII makes that
+webhook permanently unusable, including with the correct token. Verified live.
+
+Fix direction: compare bytes (`compare_digest(supplied.encode(), secret.encode())`) or reject non-ASCII
+with a 401.
+
+### E1 — Whitespace-only `old_text` corrupts the file at byte 0
+
+`edit_diff.py:233` `if not o:` tests the pre-fuzzy string, so `old_text=" "`, `"\u00a0"`, or a
+trailing-whitespace-only block passes. Then `75` `index = fuzzy_content.find(fuzzy_old)` with
+`fuzzy_old == ""` returns **0** (`find("")` is 0, not -1), `match_len = 0`, and `85-86`
+`if not fuzzy_old: return 0` disables the duplicate check. `136` then prepends `new_text` to the file.
+Verified: `edit_file` on a file without a tab, `old_text="\t"`, `new_text="X"`, reported
+`Successfully replaced 1 block(s)` and produced `Xhello world`. Two such edits both "match" at 0 and
+stack (the overlap check `258` compares `0 > 0`). When the whitespace does exist, the first occurrence
+is chosen despite the documented "must be unique" contract.
+
+Fix direction: reject an `old_text` whose fuzzy form is empty.
+
+## Medium
+
+### B1 — `read_file` `limit` is unvalidated
+
+`builtin.py:187-189`: `end = min(start + int(limit), total)`. `limit=-3` on a 6-line file gives
+`end < start`, so the content is empty and the hint prints `[6 more lines in file. Use offset=-2 to
+continue.]` — more lines than exist and a negative offset the model would act on. `limit=0` returns an
+empty selection with a "more lines" hint. `offset` is clamped (`164`), negatives are silently accepted.
+`text.split("\n")` also counts the trailing empty segment, so `total` is one more than `wc -l` for
+newline-terminated files. Verified. The `Use offset=N to continue` hint is what an agent acts on, so this
+is a correctness issue, not cosmetic. Tests never pass `offset`/`limit` at all.
+
+### S1 — New files are forced world-readable
+
+`workspace.py:22` `DEFAULT_FILE_MODE = 0o644` and `64` `os.chmod(tmp, mode)`: `mkstemp` creates 0600 and
+the code deliberately widens it, ignoring umask. Verified with `umask 077`: a tool-written file is
+`0o644`. On a shared machine everything the model writes is readable by other users, and the chmod
+happens before `os.replace`, so the temp file is briefly world-readable inside the workspace.
+Existing-file mode is preserved (`58-59`); the asymmetry is the issue.
+
+### S2 — A path equal to the workspace root escapes the boundary
+
+`workspace.py:45` `is_relative_to` is true for the root itself, so `path="."` passes. `60`
+`tempfile.mkstemp(dir=path.parent, ...)` then creates the temp file in the workspace's **parent** — a
+directory never validated against the root or the deny list — before `os.replace` fails with
+`IsADirectoryError`. Verified: a stray file appeared outside the workspace and the error message leaked
+host paths into the model-visible result. `builtin.py:255` `real.parent.mkdir(...)` targets the same
+parent. Low impact, but it contradicts the stated boundary.
+
+### P1 — Persona `SOUL.md` edits through the web UI do nothing
+
+`config.py:100-112` seeds `SOUL.md` from the config value **on first creation only**; `613-619` then
+reads the file as the source of truth. Verified: after the persona directory exists, changing
+`personas.<name>.SOUL.md` in the config still returns the old prompt. The UI shows and edits the config
+value as if it were the prompt, so a user's edit returns 200, saves, and changes nothing. Either the UI
+should edit the persona file, or the README/UI should say the value only seeds the file.
+
+### S3 — Header injection and caching on the config API
+
+- `--cors-origin` is interpolated into `Access-Control-Allow-Origin` without validation. Verified: an
+  origin containing `\r\n` produced an injected `Access-Control-Allow-Credentials: true` — credentialed
+  cross-origin access to an API that returns API keys and webhook secrets.
+- API responses containing secrets are sent with no `Cache-Control` — `no-store` is set only for the
+  served page (`web.py:871`), not for `/api`. Verified.
+- The Host allow-list (`web.py:745-746`) is skipped on wildcard binds, which the README documents as the
+  DNS-rebinding posture for `--host 0.0.0.0`; combined with CORS `*` and secrets in JSON, that is the
+  practical chain to token theft. The webhook server has no Host guard at all. Open (unauthenticated)
+  webhooks are triggerable from any browser page; authenticated ones are not, because a simple cross-origin
+  POST cannot carry `Authorization`.
+
+### C1 — The 60-second tool timeout is unenforceable for the file tools
+
+All three file tools are sync-blocking inside `async def run` (`open`, `read_bytes`, `mkstemp`), so
+`asyncio.wait_for` (`tools/__init__.py:88`) cannot fire — the code documents this at `tools/__init__.py:48-49`, but
+README's "Extending it" section states "each call is also limited to 60 seconds" without that caveat.
+Verified: a FIFO inside the workspace reports size 0, passes `_check_size` (`builtin.py:83`), blocks
+`f.read()` (`169`) forever, and the timeout never triggers; the event loop stalls and the run slot is held
+permanently (429 for every subsequent request). README line 88 says anything inside the workspace is fair
+game, so a model-created FIFO is reachable. Fix direction: run blocking tool bodies in an executor, or
+validate `st_mode` before opening.
+
+### C2 — No locking on read-modify-write
+
+`builtin.py:359` read → `376` match → `381` write with no advisory lock, and `webhooks.py:86` builds a
+fresh registry per request against the same `agent_cfg.workspace_path()`. Two concurrent runs (`agent chat`
+plus a webhook, or two webhooks) editing the same file clobber each other, and the diff returned describes
+stale content.
+
+### L1 — LLM response shape is unguarded
+
+`llm.py:169` `response.json()["choices"][0]["message"]` → `IndexError` when `choices` is empty (common with
+guardrails); a non-JSON 200 body → `ValueError`; `170-176` `raw["id"]`, `raw["function"]["arguments"]` →
+`KeyError` on a malformed tool call. `Agent.run` (`agent.py:38-72`) has no `try`, the webhook worker prints
+to stderr after already acking 200 (`webhooks.py:171`), and `cli._run_repl` (`cli.py:178-186`) catches
+only `EOFError/KeyboardInterrupt` — one transient failure ends the whole REPL. The transport-error retry
+branch and the exponential backoff (`llm.py:145-152`) are untested: the existing test uses canned
+`MockTransport` responses and `retry_delay=0`, so a change from exponential to constant delay, or a dropped
+`if last: raise`, would pass. Connection failures are the most common real failure mode.
+
+### E2 — The "no changes made" guard can never fire in fuzzy mode
+
+`edit_diff.py:264-271` compares `base_content` (normalized) against `new_content`; `used_fuzzy` is only true
+when the two views already differ (`239`), so a no-op edit modulo normalization is accepted and the file is
+rewritten with the fuzzy-normalized version of every touched line (smart quotes → ASCII, trailing whitespace
+stripped). Also `190-193`'s docstring promises preservation of unchanged-line bytes, but `213` rewrites the
+whole touched line from the normalized view — the guarantee holds only outside the touched group. Fuzzy
+uniqueness (`249`) counts in fuzzy space, so a genuinely unique exact match can be rejected: content
+`"hello \nhello\n"` with `old_text="hello "` matches exactly once but counts as two. Line-ending handling
+differs between the two paths (`374-377`): the exact path re-serializes every newline to the single detected
+ending, so a mixed CRLF/LF file is converted wholesale, and `detect_line_endings` tie-breaking (`41-49`)
+picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized content, so it omits the BOM.
+
+## Low
+
+- **S4** — `workspace.py:47` `is_relative_to` compares `PurePath` parts as strings and `resolve()` does not
+  canonicalize case, so on case-insensitive filesystems (macOS/Windows) `path="../.LIGHT-HARNESS/config.yaml"`
+  is the same file as the denied home and its API keys are readable. Platform-conditional; no test. NFC/NFD
+  decomposed names on APFS have the same shape. `resolve()` follows symlinks only, so a hardlink inside the
+  workspace reads as "inside" and leaks content (writes are safe by accident — `os.replace` breaks the link).
+- **W2** — `web.py:833` `path.read_text(encoding="utf-8")` is unguarded: a binary config file raises
+  `UnicodeDecodeError` → no response, traceback in the server log. `ConfigError` is a `ValueError` subclass
+  (`config.py:150`), so `web.py:822` turns a broken config into a 400, while the CLI aborts the command — the
+  same input behaves differently in the two entry points.
+- **B2** — `_prepare_edits` (`builtin.py:264-288`) drops entries whose `new_text` is not a string, so a request
+  that *did* send an edit reports "requires at least one replacement". Verified.
+- `edit_file`'s read block (`357-368`) has no generic `except OSError`, so `ENXIO`/`ELOOP` falls through to the
+  registry catch-all as `Error: OSError: ...` instead of the tool's own message; `WriteFileTool` does catch
+  `OSError` (`259`).
+- `atomic_write_bytes`' "a crash never leaves a truncated file" holds for truncation (rename is atomic) but not
+  durability — no `fsync`. `WriteFileTool` reports characters (`261`) while the limit is bytes (`_MAX_FILE_BYTES`).
+- `SessionLog.record` (`sessions.py:40`) has no lock; concurrent appends rely on OS atomicity.
+- `state.py:23-34` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` (`agent.py:34-36`) are
+  unreachable API surface kept alive only by tests that do not exist.
+- `cli.py:45` `load_dotenv()` reads `./.env` from the current working directory (as documented), not
+  `LIGHT_HARNESS_HOME`; `config.py:145` writes parsed values into `os.environ`, so any test that reads env vars
+  after `test_config.py:466-492` is order-dependent. `cli.py` has no tests at all.
+- `generate_diff` runs `difflib.unified_diff` over up to 10 MB inside an async tool — `SequenceMatcher` is O(n²)
+  worst case and `autojunk` can produce a misleading diff for large files. The write already happened before the
+  diff (`381` then `386`), so a timeout reports failure for a change already on disk.
+
+## Test-quality issues
+
+- `test_config.py:147` is tautological: `assert with_ws == {t.name for t in builtin_tools(tmp_path)}` compares the
+  implementation against itself.
+- `test_webhooks.py:357-363` is a mock-echo: it asserts the fixture's own literal `"sp"` (`test_webhooks.py:90`),
+  not `config.system_prompt_for`. `default_agent_factory` (`webhooks.py:79-108`) — workspace wiring, persona
+  resolution, `ensure_persona`, session creation, the `except BaseException: session.close()` leak guard — has
+  zero coverage because every server test injects its own factory.
+- `test_webhooks.py:375` `test_webhook_rejects_oversized_body_without_reading_it` proves the agent did not run,
+  not that bytes were not read. `test_workspace.py:100` `test_write_is_atomic_and_keeps_mode` never interrupts a
+  write or races a reader; it asserts an incidental directory listing.
+- Flaky/environment-sensitive: `urlopen` in `test_web.py:41,62` and `test_webhooks.py:113,118` honours `HTTP_PROXY`
+  unless `no_proxy` covers `127.0.0.1` (other tests in the same file use raw sockets — inconsistent protection);
+  `test_webhooks.py:370-372` assumes the whole status line lands in one `recv`; `join(timeout=5)` and
+  `gate.wait(5)` timeouts are never asserted, so a wedged handler thread passes.
+- Untested paths worth covering: `offset`/`limit` arithmetic and the 2000-line/50 KB truncation hints;
+  `edit_file` uniqueness, overlap, fuzzy, CRLF/BOM/mixed endings, no-op, empty file; the `POST` body-error 400/413
+  paths for the endpoint that writes the config file; `esc()` (the only thing preventing stored-XSS token theft,
+  since config values are inserted via `innerHTML`); the wildcard-bind Host skip (`web.py:745-746`); non-ASCII
+  token/secret; symlink-loop and NUL paths in `Workspace.resolve`; `atomic_write_bytes`' failure path; `array`/`object`
+  argument types (skipped by design, so `edit_file`'s `items.required` is never enforced) and unknown arguments;
+  a tool raising an exception (`tools/__init__.py:91`); `max_concurrent_runs > 1` and slot release on a failing run;
+  the `edit_file` result size limit (`builtin.py:379`).
+
+## What is solid
+
+Workspace confinement holds for the headline cases and is well tested: `../`, absolute paths, symlink escape,
+the documented home rule in both directions, empty/NUL paths, double-slash roots, no symlink creation, and
+config-layer rejection of bad workspace settings. Argument validation is correct including the `bool`-is-`int`
+trap (`tools/__init__.py:40`). Size limits are checked before writing (`builtin.py:251`, `379`). No exec,
+subprocess, or network primitives exist in the tools. The web UI access-control model — per-launch token, Host
+allow-list, constant-time compare, complete HTML escaping, env-ref preservation, on-disk refresh, secrets failing
+closed for unset env references — matches the README.
