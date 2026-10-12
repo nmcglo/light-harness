@@ -118,11 +118,13 @@ The page has a navigation sidebar (currently just **Config**) and a top bar
 showing the config file path with **Save** and **Refresh** buttons to the right.
 Beneath it, providers (each with base URL, API key, timeout, and an add/remove
 able list of models), agents (each with name, provider, model, opt-in tools, and
-persona), personas (each with its `SOUL.md` and other file contents), and the
-interaction (which agent the chat loop uses) are edited via form fields. Edits
-write back to `config.yaml` (env refs like `$NAME` / `${NAME}` are preserved),
-and on-disk changes are reflected automatically. A running `agent chat` session
-is unaffected -- changes apply to the next session.
+persona), personas (each with its `SOUL.md`; any other file a persona has is
+kept as it is), and the interaction (which agent the chat loop uses) are edited
+via form fields. Edits write back to `config.yaml` (env refs like `$NAME` /
+`${NAME}` are preserved), and on-disk changes are reflected automatically. Only
+the sections a request actually names are rewritten: a request that names none
+of them is refused, so no save can drop the sections it never touched. A running
+`agent chat` session is unaffected -- changes apply to the next session.
 
 **Access control.** The config holds API keys and webhook secrets, so the API is
 not open to arbitrary web pages even though CORS defaults to `*`:

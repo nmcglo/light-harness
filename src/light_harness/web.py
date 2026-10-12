@@ -12,8 +12,10 @@ Endpoints:
 - ``GET  /``            -> the HTML page
 - ``GET  /api/config``  -> ``{"exists", "path", "text", "data"}``
 - ``GET  /api/tools``   -> ``{"tools": [...]}`` (built-in tool names)
-- ``POST /api/config``  -> JSON body with ``providers``, ``agents``,
-                           ``personas`` and ``interaction``; written as YAML
+- ``POST /api/config``  -> JSON body naming any of ``providers``, ``agents``,
+                           ``personas``, ``interaction``; only the sections the
+                           body sends are rewritten (as YAML), the others are kept
+                           exactly as they are on disk
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from .config import config_file_path, load_yaml
+from .config import SOUL_FILENAME, config_file_path, load_yaml
 from .httputil import BodyError, read_body
 from .tools.builtin import BUILTIN_TOOL_NAMES
 
@@ -608,107 +610,206 @@ def _yaml_number(text: str) -> int | float | str | None:
     return int(value) if value.is_integer() else value
 
 
+_MANAGED_SECTIONS: tuple[str, ...] = ("providers", "agents", "personas", "interaction")
+
+
+def _section_sent(payload: dict[str, Any], section: str) -> bool:
+    """True when the body actually *sends* ``section``.
+
+    An absent key -- or one sent as ``null`` -- means "leave this section as it
+    is on disk". Reading it as "clear this section" is what let a body that named
+    nothing wipe every managed section.
+    """
+    return section in payload and payload[section] is not None
+
+
+def _form_entries(raw: Any, section: str) -> list[Any]:
+    """The form's shape for a list-shaped section: a list of entry objects.
+
+    ``providers`` and ``personas`` are mappings in the *file*; sending that shape
+    here is a client guessing wrong, so it is rejected instead of being parsed
+    into an empty section.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"{section}: expected a list of entries (the file's own mapping shape "
+            "is not what this API takes); omit the key to leave the section unchanged."
+        )
+    return raw
+
+
+def _form_entry(entry: Any, section: str, index: int) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise ValueError(f"{section}[{index}]: expected an object.")
+    return entry
+
+
+def _form_name(entry: dict[str, Any], section: str, index: int) -> str:
+    """A trimmed, non-empty ``name``, or an error naming the entry that lacks one."""
+    raw_name = entry.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ValueError(f"{section}[{index}]: each entry requires a non-empty name.")
+    return raw_name.strip()
+
+
+def _form_text(entry: dict[str, Any], key: str, where: str) -> str:
+    """An optional trimmed string field (absent or ``null`` -> empty)."""
+    value = entry.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{where}.{key}: expected a string.")
+    return value.strip()
+
+
+def _form_names(value: Any, where: str) -> list[str]:
+    """A list of non-empty strings, as ``models`` and ``tools`` are."""
+    if not isinstance(value, list):
+        raise ValueError(f"{where}: expected a list.")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{where}: every entry must be a string.")
+        if item.strip():
+            names.append(item.strip())
+    return names
+
+
+def _providers_from_form(raw: Any) -> dict[str, Any]:
+    """Build the file's ``providers:`` mapping from the form's provider list."""
+    providers: dict[str, Any] = {}
+    for index, any_entry in enumerate(_form_entries(raw, "providers")):
+        entry = _form_entry(any_entry, "providers", index)
+        name = _form_name(entry, "providers", index)
+        spec: dict[str, Any] = {}
+        for key in ("base_url", "api_key"):
+            text = _form_text(entry, key, f"providers.{name}")
+            if text:
+                spec[key] = text
+        timeout = entry.get("timeout")
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, (str, int, float)):
+                raise ValueError(
+                    f"providers.{name}.timeout: expected a number or a $NAME reference."
+                )
+            number = _yaml_number(str(timeout).strip())
+            if number is not None:
+                spec["timeout"] = number
+        if entry.get("models") is not None:
+            models = _form_names(entry["models"], f"providers.{name}.models")
+            if models:
+                spec["models"] = models
+        providers[name] = spec
+    return providers
+
+
+def _agents_from_form(raw: Any) -> list[dict[str, Any]]:
+    """Build the file's ``agents:`` list from the form's agent list."""
+    agents: list[dict[str, Any]] = []
+    for index, any_entry in enumerate(_form_entries(raw, "agents")):
+        entry = _form_entry(any_entry, "agents", index)
+        name = _form_name(entry, "agents", index)
+        agent: dict[str, Any] = {"name": name}
+        for key in ("provider", "model", "persona", "workspace"):
+            text = _form_text(entry, key, f"agents.{name}")
+            if text:
+                agent[key] = text
+        if entry.get("tools") is not None:
+            # ``[]`` means "no tools"; an absent key means the built-in default.
+            agent["tools"] = _form_names(entry["tools"], f"agents.{name}.tools")
+        agents.append(agent)
+    return agents
+
+
+def _personas_from_form(raw: Any, current: Any) -> dict[str, Any]:
+    """Build the file's ``personas:`` mapping from the form's persona list.
+
+    The form has a field for ``SOUL.md`` only, so a persona's other files (the
+    section is a name -> {file: content} mapping) are carried over from the file
+    rather than dropped by the save.
+    """
+    existing = current if isinstance(current, dict) else {}
+    personas: dict[str, Any] = {}
+    for index, any_entry in enumerate(_form_entries(raw, "personas")):
+        entry = _form_entry(any_entry, "personas", index)
+        name = _form_name(entry, "personas", index)
+        files: dict[str, str] = {}
+        carried = existing.get(name)
+        if isinstance(carried, dict):
+            for key, value in carried.items():
+                if key != SOUL_FILENAME and isinstance(key, str) and isinstance(value, str):
+                    files[key] = value
+        for key, value in entry.items():
+            if key == "name" or value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"personas.{name}.{key}: expected a string.")
+            if value.strip():
+                files[key] = value.strip()
+        if files:
+            personas[name] = files
+    return personas
+
+
+def _interaction_from_form(raw: Any) -> dict[str, Any]:
+    """Build the file's ``interaction:`` mapping from the form's chat selection."""
+    if not isinstance(raw, dict):
+        raise ValueError('interaction: expected an object, e.g. {"chat": {"agent": "name"}}.')
+    interaction: dict[str, Any] = {}
+    chat = raw.get("chat")
+    if chat is not None:
+        if not isinstance(chat, dict):
+            raise ValueError("interaction.chat: expected an object.")
+        agent = _form_text(chat, "agent", "interaction.chat")
+        if agent:
+            interaction["chat"] = {"agent": agent}
+    return interaction
+
+
+def _build_section(section: str, raw: Any, current: Any) -> Any:
+    """Build one managed section from the body's value for it."""
+    if section == "providers":
+        return _providers_from_form(raw)
+    if section == "agents":
+        return _agents_from_form(raw)
+    if section == "personas":
+        return _personas_from_form(raw, current)
+    return _interaction_from_form(raw)
+
+
 def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """Build the config mapping from the form JSON.
 
-    The form manages ``providers``, ``agents``, ``personas``, and
-    ``interaction``; any other top-level keys (e.g. ``webhooks``) are carried
-    over unchanged from ``current`` (the config already on disk).
+    The form manages ``providers``, ``agents``, ``personas``, and ``interaction``.
+    A managed section is rewritten only when the body *sends* it: a section that
+    is absent (or ``null``) is carried over exactly as it is on disk, so a body
+    that touches one section can never wipe the others, and a body that sends no
+    managed section at all is refused. A section the body does send replaces its
+    previous value -- an empty list clears it. Top-level keys the form never
+    manages (e.g. ``webhooks``) are always carried over. A section whose shape is
+    wrong is rejected with an error instead of being silently dropped.
     """
+    if not any(_section_sent(payload, section) for section in _MANAGED_SECTIONS):
+        raise ValueError(
+            "Nothing to save: the body must send at least one of providers, "
+            "agents, personas or interaction."
+        )
+
     data: dict[str, Any] = {}
+    for section in _MANAGED_SECTIONS:
+        current_value = current.get(section)
+        value = (
+            _build_section(section, payload[section], current_value)
+            if _section_sent(payload, section)
+            else current_value
+        )
+        if value:  # a section emptied through the form is written as no section
+            data[section] = value
 
-    providers: dict[str, Any] = {}
-    raw_providers = payload.get("providers")
-    if isinstance(raw_providers, list):
-        for p in raw_providers:
-            if not isinstance(p, dict):
-                continue
-            name = str(p.get("name") or "").strip()
-            if not name:
-                continue
-            entry: dict[str, Any] = {}
-            base_url = str(p.get("base_url") or "").strip()
-            if base_url:
-                entry["base_url"] = base_url
-            api_key = str(p.get("api_key") or "").strip()
-            if api_key:
-                entry["api_key"] = api_key
-            timeout = _yaml_number(str(p.get("timeout") or "").strip())
-            if timeout is not None:
-                entry["timeout"] = timeout
-            models = [str(m).strip() for m in (p.get("models") or []) if str(m).strip()]
-            if models:
-                entry["models"] = models
-            providers[name] = entry
-    if providers:
-        data["providers"] = providers
-
-    agents: list[dict[str, Any]] = []
-    raw_agents = payload.get("agents")
-    if isinstance(raw_agents, list):
-        for a in raw_agents:
-            if not isinstance(a, dict):
-                continue
-            name = str(a.get("name") or "").strip()
-            if not name:
-                raise ValueError("Each agent requires a non-empty name.")
-            agent_entry: dict[str, Any] = {"name": name}
-            provider = str(a.get("provider") or "").strip()
-            if provider:
-                agent_entry["provider"] = provider
-            model = str(a.get("model") or "").strip()
-            if model:
-                agent_entry["model"] = model
-            tools = a.get("tools")
-            if tools is not None:
-                if not isinstance(tools, list):
-                    raise ValueError(f"agent {name!r}: tools must be a list.")
-                agent_entry["tools"] = [str(t).strip() for t in tools if str(t).strip()]
-            persona = str(a.get("persona") or "").strip()
-            if persona:
-                agent_entry["persona"] = persona
-            workspace = str(a.get("workspace") or "").strip()
-            if workspace:
-                agent_entry["workspace"] = workspace
-            agents.append(agent_entry)
-    if agents:
-        data["agents"] = agents
-
-    personas: dict[str, Any] = {}
-    raw_personas = payload.get("personas")
-    if isinstance(raw_personas, list):
-        for pn in raw_personas:
-            if not isinstance(pn, dict):
-                continue
-            name = str(pn.get("name") or "").strip()
-            if not name:
-                continue
-            files = {
-                str(key): str(value).strip()
-                for key, value in pn.items()
-                if key != "name" and isinstance(value, str) and str(value).strip()
-            }
-            if files:
-                personas[name] = files
-    if personas:
-        data["personas"] = personas
-
-    interaction: dict[str, Any] = {}
-    raw_interaction = payload.get("interaction")
-    if isinstance(raw_interaction, dict):
-        chat = raw_interaction.get("chat")
-        if isinstance(chat, dict):
-            agent = str(chat.get("agent") or "").strip()
-            if agent:
-                interaction["chat"] = {"agent": agent}
-    if interaction:
-        data["interaction"] = interaction
-
-    # Preserve top-level keys the form doesn't manage (e.g. ``webhooks``) so a
+    # Carry over top-level keys the form doesn't manage (e.g. ``webhooks``) so a
     # save via the UI never drops them.
-    managed = {"providers", "agents", "personas", "interaction"}
     for key, value in current.items():
-        if key not in managed:
+        if key not in _MANAGED_SECTIONS:
             data[key] = value
 
     return data
@@ -805,7 +906,9 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"ok": False, "error": exc.message})
             return
         try:
-            payload = json.loads(raw) if raw else {}
+            # An empty body is not a JSON object: it must not stand in for "{}",
+            # which used to mean "write the config with no managed sections".
+            payload = json.loads(raw)
         except ValueError as exc:  # JSONDecodeError or invalid UTF-8
             self._send_json(400, {"ok": False, "error": f"Invalid JSON: {exc}"})
             return

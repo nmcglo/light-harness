@@ -84,6 +84,12 @@ def _post(url: str, payload: object) -> tuple[int, dict]:
     return status, json.loads(body)
 
 
+def _post_raw(url: str, body: bytes) -> tuple[int, dict]:
+    """POST a byte body exactly as given (so an empty body stays empty)."""
+    status, _, text = _request(url, "POST", body, {"Content-Type": "application/json"})
+    return status, json.loads(text)
+
+
 def test_api_requires_token(web_base: str) -> None:
     for method, data in (("GET", None), ("POST", b"{}")):
         status, _, body = _request(web_base + "/api/config", method, data, token=False)
@@ -290,3 +296,141 @@ def test_post_agent_requires_name(web_base: str, tmp_path: Path) -> None:
     assert status == 400
     assert data["ok"] is False
     assert not (tmp_path / "config.yaml").exists()
+
+
+_SEEDED_CONFIG = """\
+# a comment only a refused save keeps
+providers:
+  local:
+    base_url: http://x/v1
+    models:
+      - qwen
+agents:
+  - name: a
+    provider: local
+    model: qwen
+personas:
+  p1:
+    SOUL.md: You are kind.
+    EXAMPLES.md: keep me
+interaction:
+  chat:
+    agent: a
+webhooks:
+  - path: /hooks/x
+"""
+
+
+def _seed(tmp_path: Path) -> Path:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_SEEDED_CONFIG, encoding="utf-8")
+    return cfg
+
+
+def test_post_empty_body_changes_nothing(web_base: str, tmp_path: Path) -> None:
+    cfg = _seed(tmp_path)
+    status, data = _post_raw(web_base + "/api/config", b"")
+    assert status == 400
+    assert data["ok"] is False
+    assert cfg.read_text(encoding="utf-8") == _SEEDED_CONFIG
+
+
+def test_post_empty_object_changes_nothing(web_base: str, tmp_path: Path) -> None:
+    cfg = _seed(tmp_path)
+    status, data = _post(web_base + "/api/config", {})
+    assert status == 400
+    assert data["ok"] is False
+    assert cfg.read_text(encoding="utf-8") == _SEEDED_CONFIG
+
+
+def test_post_keeps_sections_the_body_does_not_name(web_base: str, tmp_path: Path) -> None:
+    _seed(tmp_path)
+    status, data = _post(
+        web_base + "/api/config",
+        {"agents": [{"name": "a", "provider": "local", "model": "qwen", "tools": []}]},
+    )
+    assert status == 200, data
+    parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert parsed["providers"]["local"]["models"] == ["qwen"]
+    assert parsed["personas"]["p1"]["SOUL.md"] == "You are kind."
+    assert parsed["interaction"]["chat"]["agent"] == "a"
+    assert parsed["webhooks"][0]["path"] == "/hooks/x"
+    assert parsed["agents"][0]["tools"] == []
+
+
+def test_post_null_section_is_unchanged_not_cleared(web_base: str, tmp_path: Path) -> None:
+    _seed(tmp_path)
+    status, data = _post(
+        web_base + "/api/config",
+        {"providers": None, "agents": [{"name": "b", "model": "m"}]},
+    )
+    assert status == 200, data
+    parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert parsed["providers"]["local"]["base_url"] == "http://x/v1"
+    assert [a["name"] for a in parsed["agents"]] == ["b"]
+
+
+def test_post_named_section_replaces_it(web_base: str, tmp_path: Path) -> None:
+    """A section the body sends replaces the old one; an empty list clears it."""
+    _seed(tmp_path)
+    status, data = _post(
+        web_base + "/api/config",
+        {
+            "providers": [],
+            "agents": [{"name": "a", "provider": "local", "model": "qwen", "tools": None}],
+            "personas": [{"name": "p1", "SOUL.md": "You are kind."}],
+            "interaction": {"chat": {"agent": "a"}},
+        },
+    )
+    assert status == 200, data
+    parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert "providers" not in parsed
+    assert parsed["agents"][0]["model"] == "qwen"
+    assert parsed["webhooks"][0]["path"] == "/hooks/x"
+
+
+def test_post_rejects_the_files_own_section_shape(web_base: str, tmp_path: Path) -> None:
+    cfg = _seed(tmp_path)
+    for payload in (
+        {"providers": {"local": {"base_url": "http://x/v1"}}},
+        {"personas": {"p1": {"SOUL.md": "You are kind."}}},
+        {"interaction": "a"},
+    ):
+        status, data = _post(web_base + "/api/config", payload)
+        assert status == 400, payload
+        assert data["ok"] is False
+        assert cfg.read_text(encoding="utf-8") == _SEEDED_CONFIG
+
+
+def test_post_rejects_entries_without_a_name(web_base: str, tmp_path: Path) -> None:
+    cfg = _seed(tmp_path)
+    for payload in (
+        {"providers": [{"base_url": "http://x/v1"}]},
+        {"personas": [{"SOUL.md": "You are kind."}]},
+    ):
+        status, data = _post(web_base + "/api/config", payload)
+        assert status == 400, payload
+        assert "name" in data["error"]
+        assert cfg.read_text(encoding="utf-8") == _SEEDED_CONFIG
+
+
+def test_post_rejects_non_string_persona_content(web_base: str, tmp_path: Path) -> None:
+    cfg = _seed(tmp_path)
+    status, data = _post(
+        web_base + "/api/config", {"personas": [{"name": "p1", "SOUL.md": 12}]}
+    )
+    assert status == 400
+    assert "SOUL.md" in data["error"]
+    assert cfg.read_text(encoding="utf-8") == _SEEDED_CONFIG
+
+
+def test_post_keeps_persona_files_the_form_cannot_edit(web_base: str, tmp_path: Path) -> None:
+    _seed(tmp_path)
+    status, data = _post(
+        web_base + "/api/config",
+        {"personas": [{"name": "p1", "SOUL.md": "You are sharper."}]},
+    )
+    assert status == 200, data
+    parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert parsed["personas"]["p1"]["SOUL.md"] == "You are sharper."
+    assert parsed["personas"]["p1"]["EXAMPLES.md"] == "keep me"
