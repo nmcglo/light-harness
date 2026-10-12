@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from light_harness.agent import Agent
-from light_harness.config import AgentConfig, Config, WebhookConfig
+from light_harness.config import AgentConfig, Config, Interaction, WebhookConfig
 from light_harness.llm import ChatMessage, LLMResponse
 from light_harness.tools import build_tool_registry
 from light_harness.webhooks import (
@@ -29,6 +29,7 @@ from light_harness.webhooks import (
     _bearer_matches,
     create_webhook_server,
     parse_webhook_body,
+    tool_availability_warning,
     unauthenticated_warning,
 )
 
@@ -156,10 +157,10 @@ def test_bearer_matches_rules() -> None:
     assert _bearer_matches("s3cret", "s3cret") is False  # no Bearer scheme
 
 
-def _config_with(*hooks: WebhookConfig) -> Config:
-    from light_harness.config import Interaction
-
-    return Config({}, [], {}, Interaction(), list(hooks))
+def _config_with(
+    *hooks: WebhookConfig, agents: list[AgentConfig] | None = None
+) -> Config:
+    return Config({}, agents or [], {}, Interaction(), list(hooks))
 
 
 def test_unauthenticated_warning_counts_open_webhooks() -> None:
@@ -177,6 +178,39 @@ def test_unauthenticated_warning_counts_open_webhooks() -> None:
 def test_no_warning_when_all_webhooks_authenticated() -> None:
     assert unauthenticated_warning(_config_with(WebhookConfig(path="/a", secret="s"))) is None
     assert unauthenticated_warning(_config_with()) is None
+
+
+def test_tool_availability_warning_names_implied_file_tools_without_a_workspace() -> None:
+    config = _config_with(
+        WebhookConfig(path="/hooks/write", agent="writer"),
+        agents=[AgentConfig(name="writer")],
+    )
+    warning = tool_availability_warning(config)
+    assert warning is not None
+    # No "tools" list means every built-in tool, and the file tools need a workspace.
+    assert "/hooks/write" in warning
+    assert "read_file, write_file, edit_file" in warning
+
+
+def test_tool_availability_warning_is_quiet_when_nothing_implied_is_lost() -> None:
+    config = _config_with(
+        WebhookConfig(path="/a", agent="with_ws"),
+        WebhookConfig(path="/b", agent="explicit"),
+        agents=[
+            AgentConfig(name="with_ws", workspace="/tmp/ws"),
+            AgentConfig(name="explicit", tools=["echo"]),
+        ],
+    )
+    assert tool_availability_warning(config) is None
+
+
+def test_tool_availability_warning_names_an_undefined_agent() -> None:
+    config = _config_with(
+        WebhookConfig(path="/h", agent="ghost"), agents=[AgentConfig(name="present")]
+    )
+    warning = tool_availability_warning(config)
+    assert warning is not None
+    assert "/h" in warning and "ghost" in warning
 
 
 def test_config_load_parses_webhooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -25,6 +25,7 @@ from .httputil import BodyError, declared_body, read_body
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import build_tool_registry
+from .tools.builtin import BUILTIN_TOOL_NAMES, FILE_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -264,6 +265,35 @@ def unauthenticated_warning(config: Config) -> str | None:
     )
 
 
+def tool_availability_warning(config: Config) -> str | None:
+    """A warning naming webhooks whose agent cannot use the tools its config implies,
+    or ``None``.
+
+    An agent with no ``tools`` list means "every available built-in tool", and the
+    file tools exist only with a workspace: a webhook whose agent has none runs with
+    just ``echo``, ``current_time``, ``add``. Tool names spelled out in ``tools`` are
+    already reported by the config loader, so this covers the implied set, plus
+    webhook entries naming an agent that does not exist.
+    """
+    lines: list[str] = []
+    for webhook in config.webhooks:
+        agent = config.get_agent(webhook.agent)
+        if agent is None:
+            lines.append(f"{webhook.path}: agent '{webhook.agent}' is not defined")
+        elif agent.tools is None and agent.workspace is None:
+            implied = [t for t in BUILTIN_TOOL_NAMES if t in FILE_TOOL_NAMES]
+            lines.append(
+                f"{webhook.path} (agent '{agent.name}'): no 'workspace', so "
+                f"{', '.join(implied)} are unavailable"
+            )
+    if not lines:
+        return None
+    return (
+        f"WARNING: {len(lines)} webhook(s) cannot use the tools their config implies: "
+        + "; ".join(lines)
+    )
+
+
 def serve_webhooks(
     config: Config,
     host: str = DEFAULT_HOST,
@@ -275,6 +305,9 @@ def serve_webhooks(
     warning = unauthenticated_warning(config)
     if warning:
         print(warning, file=sys.stderr)
+    tool_warning = tool_availability_warning(config)
+    if tool_warning:
+        print(tool_warning, file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

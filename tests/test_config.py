@@ -254,6 +254,15 @@ def test_webhook_with_unset_secret_variable_is_disabled(
     assert "'secret' references unset variable(s) $NO_SUCH_SECRET" in "\n".join(config.warnings)
 
 
+def test_unknown_tool_names_are_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_cfg(tmp_path, "agents:\n  - name: a\n    tools: [echo, no_such_tool]\n")
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    config = Config.load()
+    joined = "\n".join(config.warnings)
+    assert "unknown tool(s) no_such_tool" in joined
+    assert build_tool_registry(config.agents[0].tools).names() == ["echo"]
+
+
 def test_file_env_value_in_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = "providers:\n  local:\n    models:\n      - $MODEL_NAME\n"
     _write_cfg(tmp_path, cfg)

@@ -84,6 +84,7 @@ The file is sectioned:
   symlinks pointing out of it are refused, and a workspace that contains (or sits
   inside) `LIGHT_HARNESS_HOME` is rejected because that holds `config.yaml` with
   your keys. A bad workspace disables the file tools and prints a `Config warning`.
+  A `tools:` name that is not a built-in prints a `Config warning` and is ignored.
   Writes are atomic and files over 10 MB are refused. Anything *inside* the
   workspace is still fair game, so keep it narrow and prefer `tools: [read_file]`
   for agents that don't need to write.
@@ -150,6 +151,12 @@ returns the agent's answer. A webhook with a `secret` requires the request to
 carry `Authorization: Bearer <secret>`; others are unauthenticated.
 A webhook may carry an optional `system_prompt`, which overrides the agent's
 default (persona-based) system prompt for that webhook's runs.
+
+At startup the server prints warnings on stderr naming the webhooks that cannot work as
+configured: the unauthenticated ones, and any webhook whose agent cannot get the tools its
+config implies -- an omitted `tools` list means every built-in, so a webhook whose agent has
+no `workspace` loses `read_file`, `write_file` and `edit_file`, and a webhook naming an agent
+that does not exist cannot run at all.
 
 ```sh
 uv run agent webhooks                # http://127.0.0.1:8787/

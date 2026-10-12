@@ -268,10 +268,11 @@ def _workspace_problem(raw: str) -> tuple[str | None, Path | None]:
     return None, resolved
 
 
-def _check_workspace(agent: AgentConfig, where: str, warnings: list[str]) -> AgentConfig:
+def _check_agent_tools(agent: AgentConfig, where: str, warnings: list[str]) -> AgentConfig:
     """Validate ``agent.workspace`` (failing closed: a bad one is dropped, which
-    disables the file tools) and flag file tools requested without a workspace."""
-    from .tools.builtin import FILE_TOOL_NAMES  # lazy: tools imports this module
+    disables the file tools) and flag tools the config asks for but cannot get:
+    file tools with no workspace, and names that are not built in."""
+    from .tools.builtin import BUILTIN_TOOL_NAMES, FILE_TOOL_NAMES  # lazy: tools imports config
 
     if agent.workspace is not None:
         problem, resolved = _workspace_problem(agent.workspace)
@@ -290,6 +291,11 @@ def _check_workspace(agent: AgentConfig, where: str, warnings: list[str]) -> Age
                 f"{where} ({agent.name}): {', '.join(wanted)} need a 'workspace' and "
                 "will be unavailable"
             )
+    unknown = [t for t in agent.tools or [] if t not in BUILTIN_TOOL_NAMES]
+    if unknown:
+        warnings.append(
+            f"{where} ({agent.name}): unknown tool(s) {', '.join(unknown)}; ignored"
+        )
     return agent
 
 
@@ -317,7 +323,7 @@ def _parse_agents(raw: Any, warnings: list[str]) -> list[AgentConfig]:
         except ValidationError as exc:
             warnings.append(f"{where} ({name}): {_first_error(exc)}; entry ignored")
             continue
-        agent = _check_workspace(agent, where, warnings)
+        agent = _check_agent_tools(agent, where, warnings)
         if agent.name in seen:
             warnings.append(f"{where}: duplicate agent name '{agent.name}'; entry ignored")
             continue
