@@ -27,7 +27,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| W1 | `web.py` | Empty/odd POST body wipes the managed config sections | high | yes |
 | T1 | `httputil.py` | Chunked bodies read as empty; body not drained before responding | high | yes |
 | A1 | `web.py`, `webhooks.py` | Non-ASCII token/secret crashes the handler instead of 401 | high | yes |
 | E1 | `edit_diff.py` | Whitespace-only `old_text` "succeeds" and writes at byte 0 | high | yes |
@@ -47,25 +46,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## High severity
-
-### W1 — `POST /api/config` can silently wipe the config
-
-`web.py:795-838` (`do_POST`): `payload = json.loads(raw) if raw else {}` (`808`), then `_build_config_dict(payload,
-current)` merges only the sections the payload contains. A `POST` with an empty body returns
-`200` and rewrites `config.yaml` containing only the carried-over *unmanaged* keys — `providers`,
-`agents`, `personas`, `interaction` are gone. Verified: posting `b""` to a live server left a file
-with just `webhooks:`.
-
-Same class of loss on any save through the UI:
-
-- comments in `config.yaml` are destroyed (whole-file rewrite), including the commented template
-  the README tells users to copy;
-- non-string persona values and shape-mismatched sections are dropped by the parsers;
-- a blank persona name yields `personas: {"": ...}`;
-- a section emptied through the UI form is written as an empty section.
-
-Fix direction: reject payloads that are not an object, and preserve sections that the client did
-not send rather than treating "absent" as "empty".
 
 ### T1 — `Transfer-Encoding: chunked` is not handled
 
