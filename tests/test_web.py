@@ -7,6 +7,7 @@ end to end.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import threading
@@ -88,6 +89,26 @@ def _post_raw(url: str, body: bytes) -> tuple[int, dict]:
     """POST a byte body exactly as given (so an empty body stays empty)."""
     status, _, text = _request(url, "POST", body, {"Content-Type": "application/json"})
     return status, json.loads(text)
+
+
+def _post_chunked(
+    base: str, payload: object, path: str = "/api/config"
+) -> tuple[int, dict[str, str]]:
+    """POST a JSON body framed as chunked transfer encoding (urllib can only send
+    Content-Length); returns the status and the response headers."""
+    body = json.dumps(payload)
+    conn = http.client.HTTPConnection(base.removeprefix("http://"), timeout=5)
+    try:
+        conn.request(
+            "POST",
+            path,
+            f"{len(body):x}\r\n{body}\r\n0\r\n\r\n",
+            {"X-Agent-Token": _token(base), "Transfer-Encoding": "chunked"},
+        )
+        response = conn.getresponse()
+        return response.status, dict(response.headers)
+    finally:
+        conn.close()
 
 
 def test_api_requires_token(web_base: str) -> None:
@@ -434,3 +455,27 @@ def test_post_keeps_persona_files_the_form_cannot_edit(web_base: str, tmp_path: 
     parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert parsed["personas"]["p1"]["SOUL.md"] == "You are sharper."
     assert parsed["personas"]["p1"]["EXAMPLES.md"] == "keep me"
+
+
+def test_chunked_post_body_writes_the_file(web_base: str, tmp_path: Path) -> None:
+    """A chunked body is decoded, so the form's JSON reaches the parser instead of
+    reading as empty."""
+    status, _ = _post_chunked(web_base, {"agents": [{"name": "a", "model": "m"}]})
+    assert status == 200
+    data = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert data == {"agents": [{"name": "a", "model": "m"}]}
+
+
+def test_post_with_an_unread_body_closes_the_connection(web_base: str) -> None:
+    """The 404 is answered before the body is read, so the connection must close:
+    its bytes would otherwise be parsed as the next request."""
+    conn = http.client.HTTPConnection(web_base.removeprefix("http://"), timeout=5)
+    try:
+        conn.request("POST", "/api/other", "hello", {"X-Agent-Token": _token(web_base)})
+        response = conn.getresponse()
+        assert response.status == 404
+        assert response.getheader("Connection") == "close"
+    finally:
+        conn.close()
+
+

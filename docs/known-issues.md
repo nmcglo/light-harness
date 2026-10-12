@@ -27,7 +27,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| T1 | `httputil.py` | Chunked bodies read as empty; body not drained before responding | high | yes |
 | A1 | `web.py`, `webhooks.py` | Non-ASCII token/secret crashes the handler instead of 401 | high | yes |
 | E1 | `edit_diff.py` | Whitespace-only `old_text` "succeeds" and writes at byte 0 | high | yes |
 | B1 | `tools/builtin.py` | `read_file` `limit` unvalidated (negative → wrong content + bogus hint) | medium | yes |
@@ -46,19 +45,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## High severity
-
-### T1 — `Transfer-Encoding: chunked` is not handled
-
-`httputil.py:26-34` reads `Content-Length` only; `if header is None or not header.strip(): return b""`.
-A chunked sender (some HTTP clients, proxies) produces an **empty prompt** and the handler responds
-before consuming the body. Verified against the live webhook server: the agent received `''`, and on
-a reused connection the follow-up request was lost — the server closed the socket without answering.
-The oversized-body path correctly sets `close_connection = True` (`web.py:803-804`, `webhooks.py:139-140`)
-precisely because the body is not drained; the chunked path has no equivalent guard, and the 404 path never
-consumes the body at all.
-
-Fix direction: reject or decode `Transfer-Encoding: chunked`, and drain (or close) whenever the body
-is not fully read.
 
 ### A1 — Non-ASCII token/secret crashes instead of 401
 

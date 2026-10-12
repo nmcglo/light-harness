@@ -8,7 +8,9 @@ agent round-trip are exercised end to end without any network.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import socket
 import textwrap
 import threading
 import time
@@ -23,6 +25,7 @@ from light_harness.config import AgentConfig, Config, WebhookConfig
 from light_harness.llm import ChatMessage, LLMResponse
 from light_harness.tools import build_tool_registry
 from light_harness.webhooks import (
+    WebhookHandler,
     _bearer_matches,
     create_webhook_server,
     parse_webhook_body,
@@ -362,26 +365,170 @@ def test_webhook_default_system_prompt_when_unset(webhook_server) -> None:
     assert client.system_prompts == ["sp"]
 
 
-def _raw_post(url: str, headers: str) -> int:
-    """Send only a header block (no body) and return the response status code."""
-    import socket
-
+def _connect(url: str) -> socket.socket:
+    """A raw connection to the test server."""
     host, port = url.removeprefix("http://").split(":")
-    with socket.create_connection((host, int(port)), timeout=5) as s:
-        s.sendall(f"POST /hooks/open HTTP/1.1\r\nHost: x\r\n{headers}\r\n\r\n".encode())
-        return int(s.recv(4096).split(b" ", 2)[1])
+    return socket.create_connection((host, int(port)), timeout=5)
+
+
+def _read_response(stream: io.BufferedReader) -> tuple[int, dict[str, str]]:
+    """The next complete response as (status, lowercased headers); (0, {}) on EOF,
+    which is how a server that closed the connection looks to the client."""
+    first = stream.readline()
+    if not first:
+        return 0, {}
+    status = int(first.decode().split(" ", 2)[1])
+    headers = {}
+    while (line := stream.readline()) not in (b"\r\n", b"\n", b""):
+        name, _, value = line.decode("iso-8859-1").partition(":")
+        headers[name.lower()] = value.strip()
+    # The body is read too, so the next response on the connection starts in the right place.
+    stream.read(int(headers.get("content-length", "0")))
+    return status, headers
+
+
+def _raw_request(url: str, request: bytes) -> tuple[int, dict[str, str]]:
+    """Send raw request bytes on one connection and read its response."""
+    with _connect(url) as s:
+        stream = s.makefile("rb")
+        s.sendall(request)
+        return _read_response(stream)
+
+
+def _chunked_request(
+    chunks: list[str], path: str = "/hooks/open", extra: dict[str, str] | None = None
+) -> bytes:
+    """Raw request bytes for a chunked POST; ``chunks`` are the chunk payloads."""
+    lines = [f"POST {path} HTTP/1.1", "Host: x", "Transfer-Encoding: chunked"]
+    lines += [f"{name}: {value}" for name, value in (extra or {}).items()]
+    request = "\r\n".join(lines) + "\r\n\r\n"
+    for chunk in chunks:
+        request += f"{len(chunk):x}\r\n{chunk}\r\n"
+    return (request + "0\r\n\r\n").encode()
 
 
 def test_webhook_rejects_oversized_body_without_reading_it(webhook_server) -> None:
     url, client = webhook_server
-    assert _raw_post(url, f"Content-Length: {10 * 1024 * 1024}") == 413
+    status, headers = _raw_request(
+        url, b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: 10485760\r\n\r\n"
+    )
+    assert status == 413
+    # The oversized body is left on the socket, so the connection cannot be reused.
+    assert headers["connection"] == "close"
     assert client.prompts == []
 
 
 @pytest.mark.parametrize("value", ["abc", "-5"])
 def test_webhook_rejects_malformed_content_length(webhook_server, value: str) -> None:
     url, client = webhook_server
-    assert _raw_post(url, f"Content-Length: {value}") == 400
+    status, headers = _raw_request(
+        url, f"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: {value}\r\n\r\n".encode()
+    )
+    assert status == 400
+    assert headers["connection"] == "close"
+    assert client.prompts == []
+
+
+def test_chunked_body_reaches_the_agent(webhook_server) -> None:
+    url, client = webhook_server
+    assert _raw_request(url, _chunked_request(['{"a":', " 1}"]))[0] == 200
+    _wait_for_prompts(client)
+    assert client.prompts == [json.dumps({"a": 1}, indent=2)]
+
+
+def test_chunked_outranks_content_length(webhook_server) -> None:
+    """RFC 9112 3.3.3: the chunked framing is what defines the message length."""
+    url, client = webhook_server
+    status, _ = _raw_request(url, _chunked_request(["hello"], extra={"Content-Length": "3"}))
+    assert status == 200
+    _wait_for_prompts(client)
+    assert client.prompts == ["hello"]
+
+
+def test_chunk_size_extensions_and_trailers_are_tolerated(webhook_server) -> None:
+    url, client = webhook_server
+    request = (
+        b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"5;name=v\r\nhello\r\n0\r\nX-Trailer: yes\r\n\r\n"
+    )
+    assert _raw_request(url, request)[0] == 200
+    _wait_for_prompts(client)
+    assert client.prompts == ["hello"]
+
+
+def test_chunked_body_over_the_limit_is_refused_without_running(webhook_server) -> None:
+    """The oversized chunk is announced but not sent: the size check is what refuses
+    it, and the bytes left on the socket force the close."""
+    url, client = webhook_server
+    request = (
+        "POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        f"{1024 * 1024 + 1:x}\r\n"
+    ).encode()
+    status, headers = _raw_request(url, request)
+    assert status == 413
+    assert headers["connection"] == "close"
+    assert client.prompts == []
+
+
+@pytest.mark.parametrize("size_field", ["zz", "-1"])
+def test_malformed_chunk_size_is_refused(webhook_server, size_field: str) -> None:
+    url, client = webhook_server
+    request = (
+        "POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        f"{size_field}\r\nhello\r\n"
+    ).encode()
+    status, headers = _raw_request(url, request)
+    assert status == 400
+    assert headers["connection"] == "close"
+    assert client.prompts == []
+
+
+def test_transfer_encoding_other_than_chunked_is_refused(webhook_server) -> None:
+    url, client = webhook_server
+    request = (
+        b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n"
+        b"Content-Length: 5\r\n\r\nhello"
+    )
+    status, headers = _raw_request(url, request)
+    assert status == 400
+    assert headers["connection"] == "close"
+    assert client.prompts == []
+
+
+def test_chunked_body_is_consumed_so_the_connection_can_be_reused(
+    webhook_server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The body must be read to its end: otherwise the follow-up request on the same
+    connection gets the leftover chunk bytes as its own request line."""
+    monkeypatch.setattr(WebhookHandler, "protocol_version", "HTTP/1.1")  # keep-alive
+    url, client = webhook_server
+    follow_up = b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi"
+    with _connect(url) as s:
+        stream = s.makefile("rb")
+        s.sendall(_chunked_request(["hello"]) + follow_up)
+        assert _read_response(stream)[0] == 200
+        assert _read_response(stream)[0] == 200
+    _wait_for_prompts(client, 2)
+    assert sorted(client.prompts) == ["hello", "hi"]
+
+
+def test_body_left_unread_closes_the_connection(
+    webhook_server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 404 is answered before the body is read, so the connection must close
+    instead of reading those bytes as the next request."""
+    monkeypatch.setattr(WebhookHandler, "protocol_version", "HTTP/1.1")  # keep-alive
+    url, client = webhook_server
+    with _connect(url) as s:
+        stream = s.makefile("rb")
+        s.sendall(
+            b"POST /hooks/nope HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"
+            b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi"
+        )
+        status, headers = _read_response(stream)
+        assert status == 404
+        assert headers["connection"] == "close"
+        assert _read_response(stream) == (0, {})  # closed, so "hello" is never a request
     assert client.prompts == []
 
 

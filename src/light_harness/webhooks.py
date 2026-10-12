@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from .agent import Agent
 from .config import AgentConfig, Config, WebhookConfig, ensure_persona, persona_sessions_dir
-from .httputil import BodyError, read_body
+from .httputil import BodyError, declared_body, read_body
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import build_tool_registry
@@ -119,7 +119,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     timeout = REQUEST_TIMEOUT_SECONDS
 
     def _method_not_allowed(self) -> None:
-        self._send_json(
+        self._reject(
             405, {"message": "webhooks accept POST only"}, headers={"Allow": "POST"}
         )
 
@@ -129,15 +129,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         webhook = self.config.webhook_by_path(path)
         if webhook is None:
-            self._send_json(404, {"message": f"no webhook for path '{path}'"})
+            self._reject(404, {"message": f"no webhook for path '{path}'"})
             return
         if not _bearer_matches(webhook.secret, self.headers.get("Authorization")):
-            self._send_json(401, {"message": "unauthorized"})
+            self._reject(401, {"message": "unauthorized"})
             return
         try:
             body = read_body(self)
         except BodyError as exc:
-            self.close_connection = True
             self._send_json(exc.status, {"message": exc.message})
             return
         # Bound concurrent runs: each accepted POST is an LLM run on its own thread.
@@ -184,6 +183,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
         """Build the agent for ``webhook`` (overridden per server)."""
         raise NotImplementedError
 
+    def _reject(
+        self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> None:
+        """Answer a request whose body is not going to be read: the connection has
+        to close, otherwise its leftover bytes are parsed as the next request."""
+        if declared_body(self):
+            self.close_connection = True
+        self._send_json(status, payload, headers)
+
     def _send_json(
         self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
     ) -> None:
@@ -191,6 +199,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()

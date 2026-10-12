@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from .config import SOUL_FILENAME, config_file_path, load_yaml
-from .httputil import BodyError, read_body
+from .httputil import BodyError, declared_body, read_body
 from .tools.builtin import BUILTIN_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
@@ -855,15 +855,19 @@ class ConfigHandler(BaseHTTPRequestHandler):
         """Apply the Host check and, for ``/api/*``, the token check; send the
         error response and return False when the request must not proceed."""
         if not self._host_allowed():
-            self._send_json(403, {"error": "forbidden host"})
+            self._reject(403, {"error": "forbidden host"})
             return False
         supplied = self.headers.get("X-Agent-Token") or ""
         if api and not hmac.compare_digest(supplied, self.api_token):
-            self._send_json(401, {"error": "missing or invalid X-Agent-Token"})
+            self._reject(401, {"error": "missing or invalid X-Agent-Token"})
             return False
         return True
 
     def do_GET(self) -> None:
+        # A GET body is never consumed, so a request that declares one cannot be
+        # answered on a connection that stays open.
+        if declared_body(self):
+            self.close_connection = True
         path = self.path.split("?", 1)[0]
         if not self._guard(api=path.startswith("/api/")):
             return
@@ -877,7 +881,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
         else:
-            self._send_json(404, {"error": "not found"})
+            self._reject(404, {"error": "not found"})
 
     def do_OPTIONS(self) -> None:
         """CORS preflight for ``/api/*``. Needs no token (browsers don't send one)."""
@@ -897,12 +901,11 @@ class ConfigHandler(BaseHTTPRequestHandler):
         if not self._guard(api=True):
             return
         if self.path.split("?", 1)[0] != "/api/config":
-            self._send_json(404, {"error": "not found"})
+            self._reject(404, {"error": "not found"})
             return
         try:
             raw = read_body(self)
         except BodyError as exc:
-            self.close_connection = True
             self._send_json(exc.status, {"ok": False, "error": exc.message})
             return
         try:
@@ -950,11 +953,20 @@ class ConfigHandler(BaseHTTPRequestHandler):
     def _handle_get_tools(self) -> None:
         self._send_json(200, {"tools": list(BUILTIN_TOOL_NAMES)})
 
+    def _reject(self, status: int, payload: dict[str, Any]) -> None:
+        """Answer a request whose body is not going to be read: the connection has
+        to close, otherwise its leftover bytes are parsed as the next request."""
+        if declared_body(self):
+            self.close_connection = True
+        self._send_json(status, payload)
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self._send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
@@ -973,6 +985,8 @@ class ConfigHandler(BaseHTTPRequestHandler):
         # The page embeds the API token: never cache it or let it be framed.
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
