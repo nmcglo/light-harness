@@ -27,7 +27,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| A1 | `web.py`, `webhooks.py` | Non-ASCII token/secret crashes the handler instead of 401 | high | yes |
 | E1 | `edit_diff.py` | Whitespace-only `old_text` "succeeds" and writes at byte 0 | high | yes |
 | B1 | `tools/builtin.py` | `read_file` `limit` unvalidated (negative → wrong content + bogus hint) | medium | yes |
 | S1 | `tools/workspace.py` | New files forced `0o644`, umask ignored | medium | yes |
@@ -45,17 +44,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## High severity
-
-### A1 — Non-ASCII token/secret crashes instead of 401
-
-`hmac.compare_digest` accepts bytes-like objects or ASCII-only strings. `http.server` decodes headers
-as iso-8859-1, so `X-Agent-Token: café` raises `TypeError` at `web.py:760` — both call sites
-(`webhooks.py:66`) are outside any `try`, so `handle_one_request` prints a traceback
-and drops the connection with **no response at all**. A config `secret` containing non-ASCII makes that
-webhook permanently unusable, including with the correct token. Verified live.
-
-Fix direction: compare bytes (`compare_digest(supplied.encode(), secret.encode())`) or reject non-ASCII
-with a 401.
 
 ### E1 — Whitespace-only `old_text` corrupts the file at byte 0
 
@@ -208,8 +196,8 @@ picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized con
 - Untested paths worth covering: `offset`/`limit` arithmetic and the 2000-line/50 KB truncation hints;
   `edit_file` uniqueness, overlap, fuzzy, CRLF/BOM/mixed endings, no-op, empty file; the `POST` body-error 400/413
   paths for the endpoint that writes the config file; `esc()` (the only thing preventing stored-XSS token theft,
-  since config values are inserted via `innerHTML`); the wildcard-bind Host skip (`web.py:745-746`); non-ASCII
-  token/secret; symlink-loop and NUL paths in `Workspace.resolve`; `atomic_write_bytes`' failure path; `array`/`object`
+  since config values are inserted via `innerHTML`); the wildcard-bind Host skip (`web.py:745-746`);
+  symlink-loop and NUL paths in `Workspace.resolve`; `atomic_write_bytes`' failure path; `array`/`object`
   argument types (skipped by design, so `edit_file`'s `items.required` is never enforced) and unknown arguments;
   a tool raising an exception (`tools/__init__.py:91`); `max_concurrent_runs > 1` and slot release on a failing run;
   the `edit_file` result size limit (`builtin.py:379`).

@@ -10,7 +10,6 @@ the ``Authorization`` header.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import sys
 import threading
@@ -21,7 +20,7 @@ from urllib.parse import urlsplit
 
 from .agent import Agent
 from .config import AgentConfig, Config, WebhookConfig, ensure_persona, persona_sessions_dir
-from .httputil import BodyError, declared_body, read_body
+from .httputil import BodyError, declared_body, read_body, secret_matches
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import build_tool_registry
@@ -64,7 +63,7 @@ def _bearer_matches(secret: str | None, authorization: str | None) -> bool:
     """True when ``secret`` is unset, or the header carries it as a bearer."""
     if secret is None:
         return True
-    return hmac.compare_digest(_bearer_token(authorization), secret)
+    return secret_matches(_bearer_token(authorization), secret)
 
 
 async def _release_agent(agent: Agent) -> None:

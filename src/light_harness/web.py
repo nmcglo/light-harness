@@ -21,7 +21,6 @@ Endpoints:
 from __future__ import annotations
 
 import contextlib
-import hmac
 import json
 import os
 import secrets
@@ -34,7 +33,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from .config import SOUL_FILENAME, config_file_path, load_yaml
-from .httputil import BodyError, declared_body, read_body
+from .httputil import BodyError, declared_body, read_body, secret_matches
 from .tools.builtin import BUILTIN_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
@@ -858,7 +857,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self._reject(403, {"error": "forbidden host"})
             return False
         supplied = self.headers.get("X-Agent-Token") or ""
-        if api and not hmac.compare_digest(supplied, self.api_token):
+        if api and not secret_matches(supplied, self.api_token):
             self._reject(401, {"error": "missing or invalid X-Agent-Token"})
             return False
         return True

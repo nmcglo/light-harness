@@ -122,6 +122,23 @@ def test_api_requires_token(web_base: str) -> None:
     assert status == 401
 
 
+def test_non_ascii_token_is_rejected_without_crashing(web_base: str) -> None:
+    """A1: a header value that decodes to non-ASCII must get a 401, not a
+    TypeError traceback and a dropped connection. The server decodes headers as
+    iso-8859-1, so the compared value is whatever bytes hit the wire."""
+    conn = http.client.HTTPConnection(web_base.removeprefix("http://"), timeout=5)
+    try:
+        for token in ("café".encode(), "caf©".encode("iso-8859-1")):
+            conn.putrequest("GET", "/api/config")
+            conn.putheader("X-Agent-Token", token)
+            conn.endheaders()
+            response = conn.getresponse()
+            assert response.status == 401, token
+            assert "X-Agent-Token" in response.read().decode("utf-8")
+    finally:
+        conn.close()
+
+
 def test_cors_defaults_to_wildcard_on_api_but_not_on_page(web_base: str) -> None:
     _, headers, _ = _request(web_base + "/api/tools")
     assert headers["Access-Control-Allow-Origin"] == "*"

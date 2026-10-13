@@ -2,11 +2,34 @@
 
 from __future__ import annotations
 
+import hmac
 from http.server import BaseHTTPRequestHandler
 
 MAX_BODY_BYTES = 1024 * 1024
 
 _CHUNK_END = (b"\r\n", b"\n")
+
+
+def secret_matches(supplied: str, expected: str) -> bool:
+    """Constant-time comparison of a header value against a configured secret.
+
+    ``hmac.compare_digest`` raises ``TypeError`` when both operands are ``str``
+    and either contains non-ASCII, which crashes the handler mid-request with no
+    response. Compare bytes instead: ``http.server`` decodes headers as
+    iso-8859-1, so re-encoding ``supplied`` as iso-8859-1 recovers the exact
+    bytes the client put on the wire, and the config ``expected`` is compared in
+    its canonical UTF-8 form. A client that sends the secret as UTF-8 bytes
+    (curl, HTTPie) therefore authenticates; any other value -- non-ASCII or
+    not -- simply fails the comparison.
+    """
+    try:
+        supplied_bytes = supplied.encode("iso-8859-1")
+        expected_bytes = expected.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        # A parsed header value is always iso-8859-1-encodable; anything else
+        # (or an unencodable secret) can never match a wire value.
+        return False
+    return hmac.compare_digest(supplied_bytes, expected_bytes)
 
 
 class BodyError(Exception):

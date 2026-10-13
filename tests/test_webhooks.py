@@ -8,6 +8,7 @@ agent round-trip are exercised end to end without any network.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import json
 import socket
@@ -155,6 +156,14 @@ def test_bearer_matches_rules() -> None:
     assert _bearer_matches("s3cret", None) is False
     assert _bearer_matches("s3cret", "Basic abc") is False
     assert _bearer_matches("s3cret", "s3cret") is False  # no Bearer scheme
+    # Non-ASCII secrets compare in bytes: the header text is what iso-8859-1
+    # decoding produced from the wire, so the secret matches its own UTF-8
+    # bytes (what a curl-style client sends) and no other encoding of itself.
+    wire = "café".encode().decode("iso-8859-1")
+    assert _bearer_matches("café", f"Bearer {wire}") is True
+    assert _bearer_matches("café", "Bearer café") is False  # latin-1 bytes on the wire
+    assert _bearer_matches("café", "Bearer caf\u00c3\u00a8") is False
+    assert _bearer_matches("s3cret", f"Bearer {wire}") is False
 
 
 def _config_with(
@@ -337,6 +346,75 @@ def test_webhook_requires_bearer_secret(webhook_server) -> None:
     assert data == {"agent": "assistant", "message": "OK"}
     _wait_for_prompts(client)
     assert client.prompts == ['{\n  "a": 1\n}']
+
+
+def test_webhook_non_ascii_secret_authenticates_over_the_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1: a secret with non-ASCII must stay usable. The client sends its UTF-8
+    bytes; the handler compares wire bytes against the secret's UTF-8 form
+    instead of crashing on the iso-8859-1-decoded header."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(
+        tmp_path,
+        """
+        agents:
+          - name: assistant
+            provider: local
+            model: m
+            tools: []
+        webhooks:
+          - path: /hooks/uni
+            agent: assistant
+            secret: café
+        """,
+    )
+    config = Config.load()
+    client = CapturingClient()
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        return Agent(
+            client,
+            build_tool_registry(agent_cfg.tools),
+            system_prompt=webhook.system_prompt or "sp",
+        )
+
+    server = create_webhook_server(config, "127.0.0.1", 0, agent_factory=factory)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def _post_raw(authorization: bytes) -> tuple[int, dict[str, object]]:
+        conn = http.client.HTTPConnection(f"127.0.0.1:{port}", timeout=5)
+        try:
+            conn.putrequest("POST", "/hooks/uni")
+            conn.putheader("Authorization", authorization)
+            conn.putheader("Content-Length", "0")
+            conn.endheaders()
+            response = conn.getresponse()
+            payload: dict[str, object] = json.loads(response.read().decode("utf-8"))
+            return response.status, payload
+        finally:
+            conn.close()
+
+    try:
+        status, data = _post_raw("Bearer café".encode())
+        assert status == 200
+        assert data == {"agent": "assistant", "message": "OK"}
+        _wait_for_prompts(client)
+        assert client.prompts == [""]
+
+        status, data = _post_raw("Bearer cafè".encode())
+        assert status == 401
+        assert data["message"] == "unauthorized"
+
+        # The same secret sent as latin-1 bytes is not the secret's UTF-8 form.
+        status, _ = _post_raw("Bearer café".encode("iso-8859-1"))
+        assert status == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_webhook_unknown_path_is_404(webhook_server) -> None:
