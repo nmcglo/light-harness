@@ -66,12 +66,18 @@ def _fuzzy_find(content: str, old: str) -> tuple[bool, int, int, bool, str]:
     Returns ``(found, index, match_length, used_fuzzy, content_for_replacement)``.
     When fuzzy is used, ``index``/``match_length`` refer to the fuzzy-normalized
     content returned as ``content_for_replacement``.
+
+    A pattern whose fuzzy form is empty never matches: ``find("")`` returns 0
+    rather than -1, which would read as a zero-length match at byte 0 and let a
+    replacement be prepended to the file.
     """
+    fuzzy_old = normalize_for_fuzzy_match(old)
+    if not fuzzy_old:
+        return False, -1, 0, False, content
     exact = content.find(old)
     if exact != -1:
         return True, exact, len(old), False, content
     fuzzy_content = normalize_for_fuzzy_match(content)
-    fuzzy_old = normalize_for_fuzzy_match(old)
     index = fuzzy_content.find(fuzzy_old)
     if index == -1:
         return False, -1, 0, False, content
@@ -79,18 +85,20 @@ def _fuzzy_find(content: str, old: str) -> tuple[bool, int, int, bool, str]:
 
 
 def _count_occurrences(content: str, old: str) -> int:
-    """Count (fuzzy) occurrences of ``old`` in ``content``."""
+    """Count (fuzzy) occurrences of ``old`` in ``content``.
+
+    ``old`` must have a non-empty fuzzy form; an empty pattern splits at every
+    position, so its occurrence count is meaningless.
+    """
     fuzzy_content = normalize_for_fuzzy_match(content)
     fuzzy_old = normalize_for_fuzzy_match(old)
-    if not fuzzy_old:
-        return 0
     return len(fuzzy_content.split(fuzzy_old)) - 1
 
 
 def _empty(path: str, index: int, total: int) -> str:
     if total == 1:
-        return f"old_text must not be empty in {path}."
-    return f"edits[{index}].old_text must not be empty in {path}."
+        return f"old_text must not be empty or whitespace-only in {path}."
+    return f"edits[{index}].old_text must not be empty or whitespace-only in {path}."
 
 
 def _not_found(path: str, index: int, total: int) -> str:
@@ -225,12 +233,16 @@ def apply_edits(
 
     ``normalized_content`` must already be LF-normalized with the BOM stripped.
     Returns ``(base_content, new_content)``. Raises :class:`EditError` on any
-    validation problem (empty, not-found, non-unique, overlapping, no-op).
+    validation problem (empty or whitespace-only, not-found, non-unique,
+    overlapping, no-op).
     """
     total = len(edits)
     normalized = [(normalize_to_lf(o), normalize_to_lf(n)) for o, n in edits]
     for i, (o, _n) in enumerate(normalized):
-        if not o:
+        # A pattern made only of spaces, tabs or special spaces has an empty
+        # fuzzy form, so it has no region to replace; accepting it would match
+        # at byte 0 with zero length and prepend new_text to the file.
+        if not o or not normalize_for_fuzzy_match(o):
             raise EditError(_empty(path, i, total))
 
     # First pass decides whether any edit needs fuzzy matching; if so, all

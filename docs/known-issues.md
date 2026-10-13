@@ -3,6 +3,12 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
+**Update 2026-10-12:** the review's one high-severity finding has been fixed and is no
+longer listed here (`src/light_harness/tools/edit_diff.py`, regression tests in
+`tests/test_edit_file.py`). Everything below still describes `f6d9be1`, and its
+`edit_diff.py` line numbers are pre-fix. Current baseline: `uv run pytest -q` 138 passed,
+`ruff` and `mypy` clean.
+
 **Baseline checks**
 
 | Check | Result |
@@ -27,7 +33,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| E1 | `edit_diff.py` | Whitespace-only `old_text` "succeeds" and writes at byte 0 | high | yes |
 | B1 | `tools/builtin.py` | `read_file` `limit` unvalidated (negative → wrong content + bogus hint) | medium | yes |
 | S1 | `tools/workspace.py` | New files forced `0o644`, umask ignored | medium | yes |
 | S2 | `tools/workspace.py` | `path="."` puts the temp file outside the workspace | medium | yes |
@@ -42,21 +47,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | S4 | `tools/workspace.py` | Deny check is lexical (case-insensitive FS) and blind to hardlinks | low | inference |
 | W2 | `web.py` | Unguarded `read_text`; inconsistent `ConfigError` handling | low | inference |
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
-
-## High severity
-
-### E1 — Whitespace-only `old_text` corrupts the file at byte 0
-
-`edit_diff.py:233` `if not o:` tests the pre-fuzzy string, so `old_text=" "`, `"\u00a0"`, or a
-trailing-whitespace-only block passes. Then `75` `index = fuzzy_content.find(fuzzy_old)` with
-`fuzzy_old == ""` returns **0** (`find("")` is 0, not -1), `match_len = 0`, and `85-86`
-`if not fuzzy_old: return 0` disables the duplicate check. `136` then prepends `new_text` to the file.
-Verified: `edit_file` on a file without a tab, `old_text="\t"`, `new_text="X"`, reported
-`Successfully replaced 1 block(s)` and produced `Xhello world`. Two such edits both "match" at 0 and
-stack (the overlap check `258` compares `0 > 0`). When the whitespace does exist, the first occurrence
-is chosen despite the documented "must be unique" contract.
-
-Fix direction: reject an `old_text` whose fuzzy form is empty.
 
 ## Medium
 
