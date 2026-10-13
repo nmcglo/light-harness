@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import stat
 import textwrap
 from pathlib import Path
@@ -106,6 +107,33 @@ def test_write_is_atomic_and_keeps_mode(dirs: tuple[Path, Path, Path]) -> None:
     assert script.read_text() == "new\n"
     assert stat.S_IMODE(script.stat().st_mode) == 0o750
     assert [p.name for p in ws.iterdir()] == ["run.sh"]  # no stray temp files
+
+
+@pytest.mark.parametrize("umask", [0o077, 0o027, 0o022])
+def test_new_files_honour_the_umask(
+    dirs: tuple[Path, Path, Path], umask: int
+) -> None:
+    ws, _, _ = dirs
+    old_umask = os.umask(umask)
+    try:
+        assert _run(ws, "write_file", path="new.txt", content="data\n").startswith("Wrote")
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE((ws / "new.txt").stat().st_mode) == 0o666 & ~umask
+
+
+@pytest.mark.parametrize("bad", [".", "./", "sub/..", "notes/.."])
+def test_workspace_root_is_not_a_writable_file(
+    dirs: tuple[Path, Path, Path], bad: str
+) -> None:
+    ws, outside, _ = dirs
+    (ws / "notes").mkdir()
+    result = _run(ws, "write_file", path=bad, content="escape\n")
+    assert result.startswith("Error")
+    assert str(ws.parent) not in result  # the refusal must not leak host paths
+    # Nothing was created in the workspace's parent, and no temp file inside.
+    assert {p.name for p in ws.parent.iterdir()} == {"ws", "outside", "home"}
+    assert [p.name for p in ws.iterdir()] == ["notes"]
 
 
 def test_oversized_files_are_refused(dirs: tuple[Path, Path, Path]) -> None:

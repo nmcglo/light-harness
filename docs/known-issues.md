@@ -3,12 +3,15 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding and **B1** are fixed and no
-longer listed here — `src/light_harness/tools/edit_diff.py` (regression tests in
-`tests/test_edit_file.py`) and `read_file`'s `offset`/`limit` handling in
-`src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`).
-Everything below still describes `f6d9be1`, and its `edit_diff.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 154 passed, `ruff` and `mypy` clean.
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **S1** and **S2**
+are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py` (regression
+tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
+`src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), and
+the umask/root handling in `src/light_harness/tools/workspace.py` (regression tests in
+`tests/test_workspace.py`).
+Everything below still describes `f6d9be1`, and its `edit_diff.py` and `workspace.py`
+line numbers are pre-fix. Current baseline: `uv run pytest -q` 161 passed, `ruff` and
+`mypy` clean.
 
 **Baseline checks**
 
@@ -34,8 +37,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| S1 | `tools/workspace.py` | New files forced `0o644`, umask ignored | medium | yes |
-| S2 | `tools/workspace.py` | `path="."` puts the temp file outside the workspace | medium | yes |
 | P1 | `config.py` | Persona `SOUL.md` edits through the web UI have no effect | medium | yes |
 | S3 | `web.py` | CRLF injection through `--cors-origin`; secrets served without `Cache-Control` | medium | yes |
 | D1 | `README.md`, `webhooks.py` | Docs say POST returns the agent's answer; code acks immediately | medium | yes |
@@ -49,23 +50,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### S1 — New files are forced world-readable
-
-`workspace.py:22` `DEFAULT_FILE_MODE = 0o644` and `64` `os.chmod(tmp, mode)`: `mkstemp` creates 0600 and
-the code deliberately widens it, ignoring umask. Verified with `umask 077`: a tool-written file is
-`0o644`. On a shared machine everything the model writes is readable by other users, and the chmod
-happens before `os.replace`, so the temp file is briefly world-readable inside the workspace.
-Existing-file mode is preserved (`58-59`); the asymmetry is the issue.
-
-### S2 — A path equal to the workspace root escapes the boundary
-
-`workspace.py:45` `is_relative_to` is true for the root itself, so `path="."` passes. `60`
-`tempfile.mkstemp(dir=path.parent, ...)` then creates the temp file in the workspace's **parent** — a
-directory never validated against the root or the deny list — before `os.replace` fails with
-`IsADirectoryError`. Verified: a stray file appeared outside the workspace and the error message leaked
-host paths into the model-visible result. `builtin.py:255` `real.parent.mkdir(...)` targets the same
-parent. Low impact, but it contradicts the stated boundary.
 
 ### P1 — Persona `SOUL.md` edits through the web UI do nothing
 
