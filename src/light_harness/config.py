@@ -113,6 +113,35 @@ def ensure_persona(name: str, seed: str = "") -> Path:
     return directory
 
 
+def persona_soul_text(name: str) -> str | None:
+    """The persona's stored ``SOUL.md`` text, or ``None`` when the persona has no
+    ``SOUL.md`` yet.
+
+    The stored file is what :meth:`Config.system_prompt_for` uses; the config
+    value only seeds it (see :func:`ensure_persona`). Raises :class:`ValueError`
+    for an unsafe persona name (see :func:`persona_dir`)."""
+    try:
+        return persona_soul_path(name).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def write_persona_soul(name: str, content: str) -> Path:
+    """Write ``personas/<name>/SOUL.md`` and return its path.
+
+    Where :func:`ensure_persona` seeds the file on first creation and never
+    touches it again, this replaces the stored prompt: it is the edit path for a
+    persona that already exists. The persona directory and its ``sessions/`` are
+    created when missing. Raises :class:`ValueError` for an unsafe persona name
+    (see :func:`persona_dir`)."""
+    directory = persona_dir(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    persona_sessions_dir(name).mkdir(parents=True, exist_ok=True)
+    soul = persona_soul_path(name)
+    soul.write_text(content, encoding="utf-8")
+    return soul
+
+
 def load_dotenv(path: Path | None = None) -> list[str]:
     """Load ``KEY=VALUE`` lines from a ``.env`` file (default ``./.env``) into the
     environment. Variables already set in the environment win. Supports ``#``
@@ -187,6 +216,14 @@ def resolve_env(value: str) -> str:
         return os.environ[name] if name in os.environ else match.group(0)
 
     return _ENV_VAR_RE.sub(_sub, value)
+
+
+def has_env_reference(value: str) -> bool:
+    """True if ``value`` still contains a ``$NAME`` / ``${NAME}`` reference.
+
+    Tells a value that is still a reference from one :func:`resolve_env` has
+    already replaced."""
+    return bool(_ENV_VAR_RE.search(value))
 
 
 def _resolve_env_in_value(value: Any) -> Any:

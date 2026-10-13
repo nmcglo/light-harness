@@ -3,15 +3,18 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **S1** and **S2**
-are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py` (regression
-tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
-`src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), and
-the umask/root handling in `src/light_harness/tools/workspace.py` (regression tests in
-`tests/test_workspace.py`).
-Everything below still describes `f6d9be1`, and its `edit_diff.py` and `workspace.py`
-line numbers are pre-fix. Current baseline: `uv run pytest -q` 161 passed, `ruff` and
-`mypy` clean.
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **S1**, **S2** and
+**P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
+(regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
+`src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
+umask/root handling in `src/light_harness/tools/workspace.py` (regression tests in
+`tests/test_workspace.py`), and the persona `SOUL.md` round-trip: the web UI now reads and
+writes `personas/<name>/SOUL.md`, the file the prompt is taken from, instead of only the
+config value that seeds it (`src/light_harness/web.py`, `persona_soul_text` /
+`write_persona_soul` in `src/light_harness/config.py`; regression tests in
+`tests/test_web.py` and `tests/test_config.py`). Everything below still describes
+`f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
+pre-fix. Current baseline: `uv run pytest -q` 169 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -37,7 +40,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| P1 | `config.py` | Persona `SOUL.md` edits through the web UI have no effect | medium | yes |
 | S3 | `web.py` | CRLF injection through `--cors-origin`; secrets served without `Cache-Control` | medium | yes |
 | D1 | `README.md`, `webhooks.py` | Docs say POST returns the agent's answer; code acks immediately | medium | yes |
 | C1 | `tools/__init__.py` | 60 s tool timeout cannot interrupt sync-blocking tools | medium | yes |
@@ -50,14 +52,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### P1 — Persona `SOUL.md` edits through the web UI do nothing
-
-`config.py:100-112` seeds `SOUL.md` from the config value **on first creation only**; `613-619` then
-reads the file as the source of truth. Verified: after the persona directory exists, changing
-`personas.<name>.SOUL.md` in the config still returns the old prompt. The UI shows and edits the config
-value as if it were the prompt, so a user's edit returns 200, saves, and changes nothing. Either the UI
-should edit the persona file, or the README/UI should say the value only seeds the file.
 
 ### S3 — Header injection and caching on the config API
 

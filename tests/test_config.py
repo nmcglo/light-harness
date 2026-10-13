@@ -14,7 +14,9 @@ from light_harness.config import (
     config_home,
     ensure_persona,
     load_yaml,
+    persona_soul_text,
     resolve_env,
+    write_persona_soul,
 )
 from light_harness.tools import build_tool_registry, builtin_tools
 
@@ -413,6 +415,26 @@ def test_ensure_persona_does_not_overwrite(tmp_path: Path, monkeypatch: pytest.M
     # A later ensure with a different seed must not overwrite the existing file.
     ensure_persona("custom", seed="second seed")
     assert soul.read_text(encoding="utf-8") == "initial seed"
+
+
+def test_write_persona_soul_replaces_the_stored_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    soul = write_persona_soul("custom", "first prompt")
+    assert soul == tmp_path / "personas" / "custom" / "SOUL.md"
+    assert soul.read_text(encoding="utf-8") == "first prompt"
+    assert (tmp_path / "personas" / "custom" / "sessions").is_dir()
+
+    # Where ensure_persona seeds once, this replaces what is already stored.
+    write_persona_soul("custom", "second prompt")
+    assert soul.read_text(encoding="utf-8") == "second prompt"
+    assert persona_soul_text("custom") == "second prompt"
+    assert persona_soul_text("never-created") is None
+
+    with pytest.raises(ValueError, match="invalid persona name"):
+        write_persona_soul("../evil", "nope")
+    assert not (tmp_path.parent / "evil").exists()
 
 
 def test_load_yaml_invalid_yaml_raises(tmp_path: Path) -> None:

@@ -34,7 +34,9 @@ from .config import (
     persona_dir,
     persona_sessions_dir,
     persona_soul_path,
+    persona_soul_text,
     personas_home,
+    write_persona_soul,
 )
 from .llm import (
     ChatMessage,
@@ -71,7 +73,9 @@ __all__ = [
     "persona_dir",
     "persona_sessions_dir",
     "persona_soul_path",
+    "persona_soul_text",
     "personas_home",
+    "write_persona_soul",
     "WebhookConfig",
     "create_webhook_server",
     "parse_webhook_body",

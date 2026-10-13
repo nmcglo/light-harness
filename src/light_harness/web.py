@@ -8,14 +8,22 @@ resolved here). The UI only touches the file on disk: a running ``agent chat``
 session keeps the config it loaded at start, so edits apply to the *next*
 session, not the current one.
 
+A persona's prompt is the one value that does not live in the config file: the
+config's ``SOUL.md`` entry only *seeds* ``personas/<name>/SOUL.md``, and the
+stored file is what the agent reads. So the persona field shows the stored file
+and saving it writes that file too (see :func:`light_harness.config.ensure_persona`).
+
 Endpoints:
 - ``GET  /``            -> the HTML page
-- ``GET  /api/config``  -> ``{"exists", "path", "text", "data"}``
+- ``GET  /api/config``  -> ``{"exists", "path", "text", "data"}`` (``data`` shows
+                           each persona's stored ``SOUL.md``; ``text`` is the
+                           config file verbatim)
 - ``GET  /api/tools``   -> ``{"tools": [...]}`` (built-in tool names)
 - ``POST /api/config``  -> JSON body naming any of ``providers``, ``agents``,
                            ``personas``, ``interaction``; only the sections the
                            body sends are rewritten (as YAML), the others are kept
-                           exactly as they are on disk
+                           exactly as they are on disk, and a persona entry that
+                           sends ``SOUL.md`` rewrites that persona's file
 """
 
 from __future__ import annotations
@@ -32,7 +40,16 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from .config import SOUL_FILENAME, config_file_path, load_yaml
+from .config import (
+    SOUL_FILENAME,
+    config_file_path,
+    has_env_reference,
+    load_yaml,
+    persona_dir,
+    persona_soul_text,
+    resolve_env,
+    write_persona_soul,
+)
 from .httputil import BodyError, declared_body, read_body, secret_matches
 from .tools.builtin import BUILTIN_TOOL_NAMES
 
@@ -339,7 +356,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     h.push('<button class="icon remove-persona" type="button" ' +
       'title="Remove persona">&times;</button>');
     h.push('</div>');
-    h.push('<label><span>SOUL.md (system prompt)</span>' +
+    h.push('<label><span>SOUL.md (system prompt; saved to personas/&lt;name&gt;/SOUL.md)</span>' +
       '<textarea class="persona-soul" placeholder="You are ...">' +
       esc(p["SOUL.md"] || "") + "</textarea></label>");
     h.push("</div>");
@@ -725,13 +742,19 @@ def _personas_from_form(raw: Any, current: Any) -> dict[str, Any]:
 
     The form has a field for ``SOUL.md`` only, so a persona's other files (the
     section is a name -> {file: content} mapping) are carried over from the file
-    rather than dropped by the save.
+    rather than dropped by the save. A persona name becomes a directory under
+    ``LIGHT_HARNESS_HOME`` — the save also writes that persona's ``SOUL.md`` — so a
+    name that is not a single path segment is refused here instead of reaching disk.
     """
     existing = current if isinstance(current, dict) else {}
     personas: dict[str, Any] = {}
     for index, any_entry in enumerate(_form_entries(raw, "personas")):
         entry = _form_entry(any_entry, "personas", index)
         name = _form_name(entry, "personas", index)
+        try:
+            persona_dir(name)  # the name becomes a directory under the home
+        except ValueError as exc:
+            raise ValueError(f"personas[{index}]: {exc}") from exc
         files: dict[str, str] = {}
         carried = existing.get(name)
         if isinstance(carried, dict):
@@ -748,6 +771,55 @@ def _personas_from_form(raw: Any, current: Any) -> dict[str, Any]:
         if files:
             personas[name] = files
     return personas
+
+
+def _persona_souls_from_form(raw: Any) -> dict[str, str]:
+    """The persona prompts the body sends, keyed by persona name.
+
+    These are what get written to ``personas/<name>/SOUL.md`` — the file the agent
+    actually reads, where the config value is only its first-run seed. An entry that
+    omits ``SOUL.md`` (or sends it as ``null``) is left out: "not sent" means "leave
+    the stored prompt alone", while ``""`` means "clear it".
+    """
+    souls: dict[str, str] = {}
+    for index, any_entry in enumerate(_form_entries(raw, "personas")):
+        entry = _form_entry(any_entry, "personas", index)
+        name = _form_name(entry, "personas", index)
+        value = entry.get(SOUL_FILENAME)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"personas.{name}.{SOUL_FILENAME}: expected a string.")
+        souls[name] = value
+    return souls
+
+
+def _effective_persona_souls(data: dict[str, Any]) -> None:
+    """Point each persona's ``SOUL.md`` in *data* at that persona's stored file.
+
+    :meth:`light_harness.config.Config.system_prompt_for` reads
+    ``personas/<name>/SOUL.md``; the config value only seeds it on first creation.
+    Showing the config value is what made a persona edit look saved — 200, written to
+    ``config.yaml`` — while the prompt the agent uses never changed.
+
+    A config value that is still a ``$NAME`` reference is left as it is: the stored
+    file holds the *resolved* text, and showing it would turn the next save into a
+    literal rewrite of the reference."""
+    personas = data.get("personas")
+    if not isinstance(personas, dict):
+        return
+    for name, entry in personas.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        configured = entry.get(SOUL_FILENAME)
+        if isinstance(configured, str) and has_env_reference(configured):
+            continue
+        try:
+            stored = persona_soul_text(name)
+        except (OSError, ValueError):
+            continue  # unreadable file, or a name that is not a safe directory name
+        if stored is not None:
+            entry[SOUL_FILENAME] = stored
 
 
 def _interaction_from_form(raw: Any) -> dict[str, Any]:
@@ -920,9 +992,19 @@ class ConfigHandler(BaseHTTPRequestHandler):
         try:
             current = load_yaml(config_file_path())
             data = _build_config_dict(payload, current)
+            souls = (
+                _persona_souls_from_form(payload["personas"])
+                if _section_sent(payload, "personas")
+                else {}
+            )
             text = yaml.safe_dump(
                 data, sort_keys=False, default_flow_style=False, allow_unicode=True
             )
+            # The persona's prompt is the file the agent reads, so saving the form's
+            # persona field rewrites it. A ``$NAME`` in it resolves exactly as it
+            # does when the config seeds that file on first creation.
+            for persona_name, soul in souls.items():
+                write_persona_soul(persona_name, resolve_env(soul))
             path = _write_config_text(text)
         except ValueError as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
@@ -943,6 +1025,9 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 loaded = None
             if isinstance(loaded, dict):
                 data = loaded
+            # The form has to show the prompt the agent actually uses: the persona's
+            # stored SOUL.md, not the config value that only seeds it.
+            _effective_persona_souls(data)
             self._send_json(
                 200, {"exists": True, "path": str(path), "text": text, "data": data}
             )

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from light_harness.config import Config
 from light_harness.web import create_server
 
 
@@ -472,6 +473,141 @@ def test_post_keeps_persona_files_the_form_cannot_edit(web_base: str, tmp_path: 
     parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert parsed["personas"]["p1"]["SOUL.md"] == "You are sharper."
     assert parsed["personas"]["p1"]["EXAMPLES.md"] == "keep me"
+
+
+def test_persona_edit_through_the_ui_changes_the_system_prompt(
+    web_base: str, tmp_path: Path
+) -> None:
+    """The persona field edits ``personas/<name>/SOUL.md`` -- the file the agent
+    reads -- not only the config value that seeds it."""
+    status, data = _post(
+        web_base + "/api/config",
+        {
+            "agents": [{"name": "a", "provider": "local", "model": "qwen", "persona": "p1"}],
+            "personas": [{"name": "p1", "SOUL.md": "You are sharper."}],
+        },
+    )
+    assert status == 200, data
+    soul = tmp_path / "personas" / "p1" / "SOUL.md"
+    assert soul.read_text(encoding="utf-8") == "You are sharper."
+
+    cfg = Config.load()
+    assert cfg.system_prompt_for(cfg.active_agent()) == "You are sharper."
+
+    # The form now shows the prompt in force, so editing it a second time works too.
+    status, shown = _get_json(web_base + "/api/config")
+    assert status == 200
+    assert shown["data"]["personas"]["p1"]["SOUL.md"] == "You are sharper."
+    status, data = _post(
+        web_base + "/api/config",
+        {"personas": [{"name": "p1", "SOUL.md": "You are sharpest."}]},
+    )
+    assert status == 200, data
+    cfg = Config.load()
+    assert cfg.system_prompt_for(cfg.active_agent()) == "You are sharpest."
+
+
+def test_get_config_shows_the_stored_persona_soul_not_the_seed(
+    web_base: str, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("personas:\n  p1:\n    SOUL.md: seeded text\n", encoding="utf-8")
+    soul = tmp_path / "personas" / "p1" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("edited on disk", encoding="utf-8")
+
+    status, got = _get_json(web_base + "/api/config")
+    assert status == 200
+    assert got["data"]["personas"]["p1"]["SOUL.md"] == "edited on disk"
+    # The config file itself is still reported verbatim.
+    assert "seeded text" in got["text"]
+
+
+def test_get_config_shows_the_seed_until_the_persona_exists(web_base: str, tmp_path: Path) -> None:
+    """Reading the config through the API neither seeds nor creates a persona."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("personas:\n  p1:\n    SOUL.md: seeded text\n", encoding="utf-8")
+    status, got = _get_json(web_base + "/api/config")
+    assert status == 200
+    assert got["data"]["personas"]["p1"]["SOUL.md"] == "seeded text"
+    assert not (tmp_path / "personas").exists()
+
+
+def test_clearing_the_persona_field_clears_the_stored_prompt(
+    web_base: str, tmp_path: Path
+) -> None:
+    _seed(tmp_path)
+    soul = tmp_path / "personas" / "p1" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("You are kind.", encoding="utf-8")
+
+    status, data = _post(web_base + "/api/config", {"personas": [{"name": "p1", "SOUL.md": ""}]})
+    assert status == 200, data
+    assert soul.read_text(encoding="utf-8") == ""
+    parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert "SOUL.md" not in parsed["personas"]["p1"]
+    assert parsed["personas"]["p1"]["EXAMPLES.md"] == "keep me"
+
+
+def test_persona_entry_without_soul_leaves_the_stored_prompt(
+    web_base: str, tmp_path: Path
+) -> None:
+    """An entry that does not send ``SOUL.md`` saves its other fields only."""
+    _seed(tmp_path)
+    soul = tmp_path / "personas" / "p1" / "SOUL.md"
+    soul.parent.mkdir(parents=True)
+    soul.write_text("prompt on disk", encoding="utf-8")
+
+    status, data = _post(
+        web_base + "/api/config",
+        {"personas": [{"name": "p1", "EXAMPLES.md": "rewritten examples"}]},
+    )
+    assert status == 200, data
+    assert soul.read_text(encoding="utf-8") == "prompt on disk"
+    parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert parsed["personas"]["p1"]["EXAMPLES.md"] == "rewritten examples"
+
+
+def test_post_rejects_unsafe_persona_name(web_base: str, tmp_path: Path) -> None:
+    """A persona name becomes a directory name, so it is refused before anything
+    is written."""
+    cfg = _seed(tmp_path)
+    status, data = _post(
+        web_base + "/api/config", {"personas": [{"name": "../evil", "SOUL.md": "x"}]}
+    )
+    assert status == 400, data
+    assert "persona name" in data["error"]
+    assert cfg.read_text(encoding="utf-8") == _SEEDED_CONFIG
+    assert not (tmp_path.parent / "evil").exists()
+    assert not (tmp_path / "personas").exists()
+
+
+def test_persona_soul_env_ref_survives_a_save(
+    web_base: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persona file holds the resolved prompt; the config keeps the reference."""
+    monkeypatch.setenv("MY_PROMPT", "You are resolved.")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "agents:\n  - name: a\n    persona: p1\n"
+        "personas:\n  p1:\n    SOUL.md: $MY_PROMPT\n",
+        encoding="utf-8",
+    )
+    Config.load()  # first load seeds the persona file with the resolved text
+    soul = tmp_path / "personas" / "p1" / "SOUL.md"
+    assert soul.read_text(encoding="utf-8") == "You are resolved."
+
+    status, got = _get_json(web_base + "/api/config")
+    assert status == 200
+    assert got["data"]["personas"]["p1"]["SOUL.md"] == "$MY_PROMPT"
+
+    status, data = _post(
+        web_base + "/api/config",
+        {"personas": [{"name": "p1", "SOUL.md": "$MY_PROMPT be sharp."}]},
+    )
+    assert status == 200, data
+    assert "$MY_PROMPT be sharp." in cfg.read_text(encoding="utf-8")
+    assert soul.read_text(encoding="utf-8") == "You are resolved. be sharp."
 
 
 def test_chunked_post_body_writes_the_file(web_base: str, tmp_path: Path) -> None:
