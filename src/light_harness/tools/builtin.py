@@ -5,10 +5,14 @@ interface. ``read_file``, ``write_file`` and ``edit_file`` do real work on disk 
 are confined to an agent's workspace directory (see :mod:`.workspace`); they exist
 only when a workspace is configured. Add your own tools the same way and register
 them in a :class:`ToolRegistry`.
+
+Their disk work runs in a worker thread (``asyncio.to_thread``) so a slow or
+stalled file cannot block the event loop or outrun the registry's timeout.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -166,6 +170,11 @@ class ReadFileTool:
         self._workspace = workspace
 
     async def run(self, arguments: dict[str, Any]) -> str:
+        # Everything below touches the disk: keep the event loop free so the
+        # registry's timeout can actually fire.
+        return await asyncio.to_thread(self._run_blocking, arguments)
+
+    def _run_blocking(self, arguments: dict[str, Any]) -> str:
         path = str(arguments["path"])
         raw_offset = arguments.get("offset")
         offset = 1 if raw_offset is None else int(raw_offset)
@@ -258,6 +267,11 @@ class WriteFileTool:
         self._workspace = workspace
 
     async def run(self, arguments: dict[str, Any]) -> str:
+        # Everything below touches the disk: keep the event loop free so the
+        # registry's timeout can actually fire.
+        return await asyncio.to_thread(self._run_blocking, arguments)
+
+    def _run_blocking(self, arguments: dict[str, Any]) -> str:
         path = str(arguments["path"])
         content = arguments.get("content") or ""
         data = content.encode("utf-8")
@@ -359,6 +373,11 @@ class EditFileTool:
         self._workspace = workspace
 
     async def run(self, arguments: dict[str, Any]) -> str:
+        # Everything below touches the disk, and the diff is CPU-bound: keep the
+        # event loop free so the registry's timeout can actually fire.
+        return await asyncio.to_thread(self._run_blocking, arguments)
+
+    def _run_blocking(self, arguments: dict[str, Any]) -> str:
         path = str(arguments["path"])
         edits = _prepare_edits(arguments)
         if not edits:

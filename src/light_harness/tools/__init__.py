@@ -45,8 +45,12 @@ def _check_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> str |
 class ToolRegistry:
     """A registry of :class:`Tool` instances keyed by name.
 
-    Each tool call is limited to ``timeout`` seconds (async tools only: a tool
-    blocking the event loop synchronously cannot be interrupted)."""
+    Each tool call is limited to ``timeout`` seconds. A timeout can only fire
+    while the loop is free: a tool whose ``run`` blocks the event loop
+    synchronously cannot be interrupted, so a tool that does blocking work (disk,
+    sockets) must hand it to a thread — the built-in file tools use
+    :func:`asyncio.to_thread`. A call that times out is abandoned, not killed:
+    its worker thread runs to completion in the background."""
 
     def __init__(self, timeout: float = TOOL_TIMEOUT_SECONDS) -> None:
         self.timeout = timeout

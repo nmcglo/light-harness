@@ -8,7 +8,9 @@ out of the root are all refused.
 
 Limitation: the check and the later open are separate steps, so someone else on
 the machine who can swap a directory for a symlink in between could still escape.
-The tools never create symlinks themselves.
+An existing path must also be a *regular* file: a FIFO, socket or device reports
+``st_size`` 0, so the size limit would not stop it, and reading one blocks the
+tool forever. The tools never create symlinks themselves.
 """
 
 from __future__ import annotations
@@ -33,8 +35,10 @@ class Workspace:
 
     def resolve(self, raw: str) -> Path:
         """The real path for ``raw`` (relative to the root unless absolute), or
-        raise :class:`WorkspaceError` if it is outside the workspace, denied, or
-        the root directory itself."""
+        raise :class:`WorkspaceError` if it is outside the workspace, denied, the
+        root directory itself, or an existing path that is not a regular file
+        (directory, FIFO, socket, device). A path that does not exist yet is
+        returned as-is so ``write_file`` can create it."""
         if not raw or "\x00" in raw:
             raise WorkspaceError("invalid path")
         try:
@@ -49,6 +53,14 @@ class Workspace:
             raise WorkspaceError(f"path is outside the workspace: {raw}")
         if any(candidate.is_relative_to(d) for d in self.deny):
             raise WorkspaceError(f"path is not accessible: {raw}")
+        try:
+            mode = candidate.stat().st_mode
+        except FileNotFoundError:
+            return candidate  # write_file is allowed to create it
+        if stat.S_ISDIR(mode):
+            raise WorkspaceError(f"path is a directory, not a file: {raw}")
+        if not stat.S_ISREG(mode):
+            raise WorkspaceError(f"path is not a regular file (FIFO, socket or device): {raw}")
         return candidate
 
 

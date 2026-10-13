@@ -3,7 +3,7 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **S1**, **S2**,
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **C1**, **S1**, **S2**,
 **S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
@@ -20,9 +20,15 @@ shared by both servers (`host_allow_list` / `host_is_allowed` in `src/light_harn
 instead of being skipped on a wildcard bind — the webhook server had none at all, and a name
 the bind host does not cover now has to be named with the new `--allowed-host` option on
 `agent web` / `agent webhooks` (regression tests in `tests/test_web.py` and
-`tests/test_webhooks.py`; README access-control sections updated). Everything below still
-describes `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line
-numbers are pre-fix. Current baseline: `uv run pytest -q` 175 passed, `ruff` and `mypy` clean.
+`tests/test_webhooks.py`; README access-control sections updated), and the 60-second tool
+timeout: the file tools now hand their blocking disk work to a worker thread
+(`asyncio.to_thread` in `src/light_harness/tools/builtin.py`), so `asyncio.wait_for` can fire
+and the loop keeps running while a call is stalled, and `Workspace.resolve` refuses any
+existing path that is not a regular file — the FIFO behind the original repro is rejected
+before anything opens it (`src/light_harness/tools/workspace.py`; regression tests in
+`tests/test_tool_timeout.py`; README caveats updated). Everything below still describes
+`f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
+pre-fix. Current baseline: `uv run pytest -q` 182 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -49,7 +55,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
 | D1 | `README.md`, `webhooks.py` | Docs say POST returns the agent's answer; code acks immediately | medium | yes |
-| C1 | `tools/__init__.py` | 60 s tool timeout cannot interrupt sync-blocking tools | medium | yes |
 | B2 | `tools/builtin.py` | Non-string `edit_file` entries silently dropped | low | yes |
 | C2 | `tools/builtin.py` | No locking on read-modify-write | medium | inference |
 | L1 | `llm.py` | Unguarded response shape (`choices[0]`, malformed tool_call) | medium | inference |
@@ -59,17 +64,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### C1 — The 60-second tool timeout is unenforceable for the file tools
-
-All three file tools are sync-blocking inside `async def run` (`open`, `read_bytes`, `mkstemp`), so
-`asyncio.wait_for` (`tools/__init__.py:88`) cannot fire — the code documents this at `tools/__init__.py:48-49`, but
-README's "Extending it" section states "each call is also limited to 60 seconds" without that caveat.
-Verified: a FIFO inside the workspace reports size 0, passes `_check_size` (`builtin.py:83`), blocks
-`f.read()` (`169`) forever, and the timeout never triggers; the event loop stalls and the run slot is held
-permanently (429 for every subsequent request). README line 88 says anything inside the workspace is fair
-game, so a model-created FIFO is reachable. Fix direction: run blocking tool bodies in an executor, or
-validate `st_mode` before opening.
 
 ### C2 — No locking on read-modify-write
 
@@ -126,9 +120,10 @@ picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized con
 - `cli.py:45` `load_dotenv()` reads `./.env` from the current working directory (as documented), not
   `LIGHT_HARNESS_HOME`; `config.py:145` writes parsed values into `os.environ`, so any test that reads env vars
   after `test_config.py:466-492` is order-dependent. `cli.py` has no tests at all.
-- `generate_diff` runs `difflib.unified_diff` over up to 10 MB inside an async tool — `SequenceMatcher` is O(n²)
-  worst case and `autojunk` can produce a misleading diff for large files. The write already happened before the
-  diff (`381` then `386`), so a timeout reports failure for a change already on disk.
+- `generate_diff` runs `difflib.unified_diff` over up to 10 MB — `SequenceMatcher` is O(n²) worst
+  case and `autojunk` can produce a misleading diff for large files. It now runs in the edit
+  tool's worker thread, so it no longer stalls the event loop, but the write already happened
+  before the diff (`381` then `386`), so a timeout reports failure for a change already on disk.
 
 ## Test-quality issues
 

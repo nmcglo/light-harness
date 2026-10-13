@@ -85,9 +85,11 @@ The file is sectioned:
   inside) `LIGHT_HARNESS_HOME` is rejected because that holds `config.yaml` with
   your keys. A bad workspace disables the file tools and prints a `Config warning`.
   A `tools:` name that is not a built-in prints a `Config warning` and is ignored.
-  Writes are atomic and files over 10 MB are refused. Anything *inside* the
-  workspace is still fair game, so keep it narrow and prefer `tools: [read_file]`
-  for agents that don't need to write.
+  Writes are atomic and files over 10 MB are refused. Only regular files are
+  reachable: a FIFO, socket or device inside the workspace is refused, because
+  reading one would block the tool. Anything else *inside* the workspace is still
+  fair game, so keep it narrow and prefer `tools: [read_file]` for agents that
+  don't need to write.
 - `personas:` — names a persona. Each named persona gets a directory under
   `LIGHT_HARNESS_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
   `sessions/` directory of conversation logs. The `SOUL.md` value seeds that file
@@ -194,8 +196,12 @@ uv run agent webhooks --allowed-host hooks.example # behind a proxy at that name
   dict), then `registry.register(MyTool())`. Before `run` is called, the registry
   checks the arguments against `parameters` (required keys and scalar types) and
   returns a descriptive error to the model on a mismatch; each call is also limited
-  to 60 seconds. Tools registered this way are used programmatically -- the
-  `tools:` config list only selects among the built-ins.
+  to 60 seconds -- but a timeout can only fire while the event loop is free, so a
+  tool whose `run` blocks the loop synchronously cannot be interrupted: hand
+  blocking work (disk, sockets) to a thread with `asyncio.to_thread`, as the
+  built-in file tools do. A timed-out call is abandoned, not killed: its worker
+  thread runs to completion in the background. Tools registered this way are used
+  programmatically -- the `tools:` config list only selects among the built-ins.
 - **Use a different model**: implement the `LLMClient` protocol
   (`async chat(...) -> LLMResponse`, `async close()`) and pass it to `Agent`.
   The default client talks to any OpenAI-compatible endpoint; set it per
