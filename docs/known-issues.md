@@ -3,11 +3,12 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding has been fixed and is no
-longer listed here (`src/light_harness/tools/edit_diff.py`, regression tests in
-`tests/test_edit_file.py`). Everything below still describes `f6d9be1`, and its
-`edit_diff.py` line numbers are pre-fix. Current baseline: `uv run pytest -q` 138 passed,
-`ruff` and `mypy` clean.
+**Update 2026-10-12:** the review's one high-severity finding and **B1** are fixed and no
+longer listed here — `src/light_harness/tools/edit_diff.py` (regression tests in
+`tests/test_edit_file.py`) and `read_file`'s `offset`/`limit` handling in
+`src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`).
+Everything below still describes `f6d9be1`, and its `edit_diff.py` line numbers are
+pre-fix. Current baseline: `uv run pytest -q` 154 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -33,7 +34,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| B1 | `tools/builtin.py` | `read_file` `limit` unvalidated (negative → wrong content + bogus hint) | medium | yes |
 | S1 | `tools/workspace.py` | New files forced `0o644`, umask ignored | medium | yes |
 | S2 | `tools/workspace.py` | `path="."` puts the temp file outside the workspace | medium | yes |
 | P1 | `config.py` | Persona `SOUL.md` edits through the web UI have no effect | medium | yes |
@@ -49,16 +49,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### B1 — `read_file` `limit` is unvalidated
-
-`builtin.py:187-189`: `end = min(start + int(limit), total)`. `limit=-3` on a 6-line file gives
-`end < start`, so the content is empty and the hint prints `[6 more lines in file. Use offset=-2 to
-continue.]` — more lines than exist and a negative offset the model would act on. `limit=0` returns an
-empty selection with a "more lines" hint. `offset` is clamped (`164`), negatives are silently accepted.
-`text.split("\n")` also counts the trailing empty segment, so `total` is one more than `wc -l` for
-newline-terminated files. Verified. The `Use offset=N to continue` hint is what an agent acts on, so this
-is a correctness issue, not cosmetic. Tests never pass `offset`/`limit` at all.
 
 ### S1 — New files are forced world-readable
 
@@ -183,8 +173,8 @@ picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized con
   unless `no_proxy` covers `127.0.0.1` (other tests in the same file use raw sockets — inconsistent protection);
   `test_webhooks.py:370-372` assumes the whole status line lands in one `recv`; `join(timeout=5)` and
   `gate.wait(5)` timeouts are never asserted, so a wedged handler thread passes.
-- Untested paths worth covering: `offset`/`limit` arithmetic and the 2000-line/50 KB truncation hints;
-  `edit_file` uniqueness, overlap, fuzzy, CRLF/BOM/mixed endings, no-op, empty file; the `POST` body-error 400/413
+- Untested paths worth covering: `edit_file` uniqueness, overlap, fuzzy, CRLF/BOM/mixed endings, no-op, empty file;
+  the `POST` body-error 400/413
   paths for the endpoint that writes the config file; `esc()` (the only thing preventing stored-XSS token theft,
   since config values are inserted via `innerHTML`); the wildcard-bind Host skip (`web.py:745-746`);
   symlink-loop and NUL paths in `Workspace.resolve`; `atomic_write_bytes`' failure path; `array`/`object`

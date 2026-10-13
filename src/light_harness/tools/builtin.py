@@ -148,8 +148,16 @@ class ReadFileTool:
                 "type": "string",
                 "description": "Path to the file to read, relative to the workspace root.",
             },
-            "offset": {"type": "integer", "description": "1-based start line (default 1)."},
-            "limit": {"type": "integer", "description": "Maximum number of lines to return."},
+            "offset": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based start line (default 1).",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of lines to return (1 or more).",
+            },
         },
         "required": ["path"],
     }
@@ -159,9 +167,15 @@ class ReadFileTool:
 
     async def run(self, arguments: dict[str, Any]) -> str:
         path = str(arguments["path"])
-        offset = int(arguments.get("offset") or 1)
-        limit = arguments.get("limit")
-        start = max(offset, 1) - 1
+        raw_offset = arguments.get("offset")
+        offset = 1 if raw_offset is None else int(raw_offset)
+        raw_limit = arguments.get("limit")
+        limit = None if raw_limit is None else int(raw_limit)
+        if offset < 1:
+            return f"Error: read_file offset must be 1 or more, got {offset}."
+        if limit is not None and limit < 1:
+            return f"Error: read_file limit must be 1 or more, got {limit}."
+        start = offset - 1
         try:
             real = self._workspace.resolve(path)
             _check_size(real, path)
@@ -178,18 +192,17 @@ class ReadFileTool:
         except UnicodeDecodeError:
             return f"Error: {path} is not valid UTF-8 text."
 
+        if not text:
+            return ""
         all_lines = text.split("\n")
-        total = len(all_lines)
+        # A newline-terminated file splits into one trailing empty segment that is not a
+        # line: it is not counted, but a slice reaching it keeps the terminator.
+        total = len(all_lines) - (1 if text.endswith("\n") else 0)
         if start >= total:
             return f"Offset {offset} is beyond end of file ({total} lines total)."
         start_display = start + 1
-        if limit is not None:
-            end = min(start + int(limit), total)
-            selected = "\n".join(all_lines[start:end])
-            user_limited = end - start
-        else:
-            selected = "\n".join(all_lines[start:])
-            user_limited = None
+        end = len(all_lines) if limit is None else min(start + limit, len(all_lines))
+        selected = "\n".join(all_lines[start:end])
 
         content, truncated, truncated_by, output_lines = _truncate_head(
             selected, _READ_MAX_LINES, _READ_MAX_BYTES
@@ -201,21 +214,21 @@ class ReadFileTool:
                 f"{_format_size(_READ_MAX_BYTES)} limit. Use a smaller limit or a narrower range."
             )
         if truncated:
-            end_display = start_display + output_lines - 1
-            next_offset = end_display + 1
+            # output_lines can include the trailing empty segment; no line exists past
+            # `total`, so never hint at an offset the file does not have.
+            end_display = min(start_display + output_lines - 1, total)
             limit_note = (
                 f" ({_format_size(_READ_MAX_BYTES)} limit)" if truncated_by == "bytes" else ""
             )
+            tail = f" Use offset={end_display + 1} to continue." if end_display < total else ""
             return (
                 f"{content}\n\n[Showing lines {start_display}-{end_display} of {total}"
-                f"{limit_note}. Use offset={next_offset} to continue.]"
+                f"{limit_note}.{tail}]"
             )
-        if user_limited is not None and start + user_limited < total:
-            remaining = total - (start + user_limited)
-            next_offset = start + user_limited + 1
+        if limit is not None and end < total:
             return (
-                f"{content}\n\n[{remaining} more lines in file. "
-                f"Use offset={next_offset} to continue.]"
+                f"{content}\n\n[{total - end} more lines in file. "
+                f"Use offset={end + 1} to continue.]"
             )
         return content
 
