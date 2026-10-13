@@ -5,6 +5,12 @@
 section. Each webhook hands the parsed request body to its configured agent and
 returns the agent's answer. A webhook can optionally require a bearer secret in
 the ``Authorization`` header.
+
+Every request must also carry a ``Host`` header that names this server -- a
+loopback name, an IP address, the bind host, or one passed as ``allowed_hosts``
+(see :func:`light_harness.htputil.host_is_allowed`). A webhook that needs no
+secret is otherwise triggerable by any page that can reach the port, including a
+page whose own hostname has been made to resolve to this machine.
 """
 
 from __future__ import annotations
@@ -13,14 +19,21 @@ import asyncio
 import json
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
 from .agent import Agent
 from .config import AgentConfig, Config, WebhookConfig, ensure_persona, persona_sessions_dir
-from .httputil import BodyError, declared_body, read_body, secret_matches
+from .httputil import (
+    BodyError,
+    declared_body,
+    host_allow_list,
+    host_is_allowed,
+    read_body,
+    secret_matches,
+)
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import build_tool_registry
@@ -113,19 +126,31 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     config: Config
     run_slots: threading.BoundedSemaphore
+    allowed_hosts: frozenset[str]
 
     # Per-connection socket timeout: a client that stalls mid-request can't hold a
     # handler thread forever.
     timeout = REQUEST_TIMEOUT_SECONDS
 
     def _method_not_allowed(self) -> None:
+        if not self._host_ok():
+            return
         self._reject(
             405, {"message": "webhooks accept POST only"}, headers={"Allow": "POST"}
         )
 
+    def _host_ok(self) -> bool:
+        """Answer with 403 unless the ``Host`` header names this server."""
+        if host_is_allowed(self, self.allowed_hosts):
+            return True
+        self._reject(403, {"message": "forbidden host"})
+        return False
+
     do_GET = do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _method_not_allowed
 
     def do_POST(self) -> None:
+        if not self._host_ok():
+            return
         path = urlsplit(self.path).path
         webhook = self.config.webhook_by_path(path)
         if webhook is None:
@@ -217,19 +242,25 @@ def create_webhook_server(
     port: int,
     agent_factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] | None = None,
     max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS,
+    allowed_hosts: Sequence[str] = (),
 ) -> ThreadingHTTPServer:
     """Build (but do not start) the webhook server for ``config``.
 
-    At most ``max_concurrent_runs`` agent runs are in flight; further POSTs get 429."""
+    At most ``max_concurrent_runs`` agent runs are in flight; further POSTs get 429.
+    A request whose ``Host`` header does not name this server gets 403 before any
+    agent is built; ``allowed_hosts`` are the names the server is really reached by
+    (a public hostname, the name a reverse proxy forwards)."""
     factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] = (
         default_agent_factory if agent_factory is None else agent_factory
     )
     bound_config = config
     bound_slots = threading.BoundedSemaphore(max(1, max_concurrent_runs))
+    bound_hosts = host_allow_list(host, allowed_hosts)
 
     class BoundHandler(WebhookHandler):
         config = bound_config
         run_slots = bound_slots
+        allowed_hosts = bound_hosts
 
         def _make_agent(self, webhook: WebhookConfig) -> Agent:
             agent_cfg = self.config.get_agent(webhook.agent)
@@ -297,9 +328,10 @@ def serve_webhooks(
     config: Config,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    allowed_hosts: Sequence[str] = (),
 ) -> None:
     """Run the webhook server until interrupted (blocking)."""
-    server = create_webhook_server(config, host, port)
+    server = create_webhook_server(config, host, port, allowed_hosts=allowed_hosts)
     print(f"Serving {len(config.webhooks)} webhook(s) at http://{host}:{port}/")
     warning = unauthenticated_warning(config)
     if warning:

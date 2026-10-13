@@ -31,12 +31,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import secrets
 import tempfile
+from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import yaml
 
@@ -50,7 +51,14 @@ from .config import (
     resolve_env,
     write_persona_soul,
 )
-from .httputil import BodyError, declared_body, read_body, secret_matches
+from .httputil import (
+    BodyError,
+    declared_body,
+    host_allow_list,
+    host_is_allowed,
+    read_body,
+    secret_matches,
+)
 from .tools.builtin import BUILTIN_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
@@ -910,17 +918,11 @@ class ConfigHandler(BaseHTTPRequestHandler):
     # Bound per server by create_server().
     api_token: str
     cors_allow_origin: str | None
-    allowed_hosts: frozenset[str] | None
+    allowed_hosts: frozenset[str]
 
     def _host_allowed(self) -> bool:
-        """Reject unexpected ``Host`` headers (DNS rebinding)."""
-        if self.allowed_hosts is None:
-            return True
-        try:
-            hostname = urlsplit("//" + (self.headers.get("Host") or "")).hostname
-        except ValueError:
-            return False
-        return hostname is not None and hostname.lower() in self.allowed_hosts
+        """True when the request's ``Host`` header names this server."""
+        return host_is_allowed(self, self.allowed_hosts)
 
     def _guard(self, api: bool) -> bool:
         """Apply the Host check and, for ``/api/*``, the token check; send the
@@ -1049,6 +1051,9 @@ class ConfigHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # /api/* answers carry the config's API keys and webhook secrets, so none
+        # of them -- not even an error -- may be cached by anything in between.
+        self.send_header("Cache-Control", "no-store")
         if self.close_connection:
             self.send_header("Connection", "close")
         self._send_cors_headers()
@@ -1084,26 +1089,65 @@ class ConfigServer(ThreadingHTTPServer):
     token: str
 
 
-def _allowed_hosts(bind_host: str) -> frozenset[str] | None:
-    """Hostnames a request's ``Host`` header may carry, or ``None`` (no check) when
-    bound to a wildcard address where the served names can't be known."""
-    if bind_host in ("", "0.0.0.0", "::"):
+_CORS_ORIGIN_RE = re.compile(
+    r"https?://"
+    r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)"
+    r"(?::[0-9]{1,5})?"
+)
+
+
+def _validated_cors_origin(origin: str | None) -> str | None:
+    """The value to send as ``Access-Control-Allow-Origin``, or ``None`` when CORS
+    is disabled (``None`` or empty).
+
+    ``*`` is accepted as it is; anything else must be a bare origin -- ``http(s)``
+    plus a host and an optional port. The value is echoed into a response header
+    verbatim, so a value carrying ``CR``/``LF`` would append a header of the
+    caller's choosing (``Access-Control-Allow-Credentials: true``, say) to every
+    ``/api/*`` response -- an API that returns API keys and webhook secrets. A path,
+    query, fragment or ``user:pass@`` is not an origin either and never matched a
+    browser's origin comparison anyway, so rejecting them at startup turns a typo
+    into a message instead of a silently wider CORS.
+    """
+    if origin is None or not origin.strip():
         return None
-    return frozenset({"localhost", "127.0.0.1", "::1", bind_host.lower()})
+    if origin == "*":
+        return "*"
+    if not _CORS_ORIGIN_RE.fullmatch(origin):
+        raise ValueError(
+            f"Invalid CORS allow-origin {origin!r}: use '*' or a bare origin such as "
+            "https://ui.example or https://ui.example:8443 (no path, credentials, "
+            "or whitespace)."
+        )
+    return origin
 
 
-def create_server(host: str, port: int, cors_origin: str | None = "*") -> ConfigServer:
+def create_server(
+    host: str,
+    port: int,
+    cors_origin: str | None = "*",
+    allowed_hosts: Sequence[str] = (),
+) -> ConfigServer:
     """Build (but do not start) the config web server.
 
     ``cors_origin`` is sent as ``Access-Control-Allow-Origin`` on ``/api/*``
-    responses (default ``*``; empty/``None`` disables CORS). Every ``/api/*``
-    request must also carry the per-launch token (``server.token``) in an
-    ``X-Agent-Token`` header, so permissive CORS does not let other sites use the
-    API. The token is only embedded in the HTML page, which is never sent with CORS
-    headers and is guarded by a ``Host`` allow-list against DNS rebinding."""
+    responses (default ``*``; empty/``None`` disables CORS) and must be ``*`` or a
+    bare origin -- anything else raises ``ValueError`` (see
+    :func:`_validated_cors_origin`). Every ``/api/*`` request must also carry the
+    per-launch token (``server.token``) in an ``X-Agent-Token`` header, so permissive
+    CORS does not let other sites use the API.
+
+    The token is only embedded in the HTML page, which is sent with no CORS headers,
+    with ``Cache-Control: no-store``, and only for a request whose ``Host`` header
+    names this server: loopback names, an IP address, the bind host, or one of
+    ``allowed_hosts`` (the names this server is actually reached by -- a mDNS name,
+    the name a reverse proxy forwards). Binding to a wildcard address does not relax
+    that: it is the bind a browser can be talked into reaching under an attacker's
+    hostname.
+    """
     token = secrets.token_urlsafe(32)
-    origin = cors_origin or None
-    hosts = _allowed_hosts(host)
+    origin = _validated_cors_origin(cors_origin)
+    hosts = host_allow_list(host, allowed_hosts)
 
     class BoundHandler(ConfigHandler):
         api_token = token
@@ -1116,10 +1160,13 @@ def create_server(host: str, port: int, cors_origin: str | None = "*") -> Config
 
 
 def serve_config(
-    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, cors_origin: str | None = "*"
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    cors_origin: str | None = "*",
+    allowed_hosts: Sequence[str] = (),
 ) -> None:
     """Run the config web server until interrupted (blocking)."""
-    server = create_server(host, port, cors_origin)
+    server = create_server(host, port, cors_origin, allowed_hosts)
     print(f"Serving config UI at http://{host}:{port}/")
     print(f"Config file: {config_file_path()}")
     print(f"CORS allow-origin: {cors_origin or '(disabled)'}")

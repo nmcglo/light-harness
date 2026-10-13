@@ -192,6 +192,119 @@ def test_rejects_unexpected_host_header(web_base: str) -> None:
     assert status == 200
 
 
+def test_cors_origin_must_be_a_bare_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3: the allow-origin is echoed into a response header verbatim, so a value
+    carrying CRLF appends a header of the caller's choosing --
+    ``Access-Control-Allow-Credentials: true``, say -- to every ``/api/*`` answer,
+    which carries the config's API keys and webhook secrets."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    injected = "http://ui.example\r\nAccess-Control-Allow-Credentials: true"
+    for bad in (
+        injected,
+        "http://ui.example\nX-Injected: 1",
+        "http://ui.example/path",
+        "http://ui.example?next=1",
+        "http://ui.example#frag",
+        "http://user:pass@ui.example",
+        "http://ui.example ",
+        "http://ui.example:port",
+        "ui.example",
+        "null",
+        "javascript:alert(1)",
+    ):
+        with pytest.raises(ValueError, match="Invalid CORS allow-origin"):
+            create_server("127.0.0.1", 0, cors_origin=bad)
+    for good in (
+        "*",
+        "http://ui.example",
+        "https://ui.example:8443",
+        "http://127.0.0.1:3000",
+        "https://[::1]:8080",
+    ):
+        server = create_server("127.0.0.1", 0, cors_origin=good)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/api/tools"
+            _, headers, _ = _request(url)
+            assert headers.get("Access-Control-Allow-Origin") == good
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
+def test_api_responses_are_not_cacheable(web_base: str) -> None:
+    """S3: ``/api/config`` returns the config file verbatim -- API keys and webhook
+    secrets -- but only the page was sent with ``Cache-Control: no-store``."""
+    cases = (
+        ("GET", "/api/config", True, None),
+        ("GET", "/api/tools", True, None),
+        ("GET", "/api/tools", False, None),  # a 401 is a response too
+        ("GET", "/nope", False, None),  # a 404
+        ("POST", "/api/config", True, b"not json"),  # a 400
+    )
+    for method, path, token, data in cases:
+        status, headers, _ = _request(web_base + path, method, data, token=token)
+        assert status in (200, 400, 401, 404), (method, path, status)
+        assert headers["Cache-Control"] == "no-store", (method, path, status)
+
+
+def test_wildcard_bind_still_checks_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S3: binding ``0.0.0.0`` used to switch the Host check off entirely -- the bind
+    a browser can be talked into reaching under a hostname an attacker controls."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    server = create_server("0.0.0.0", 0)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for path in ("/", "/api/config", "/api/tools"):
+            status, _, _ = _request(base + path, headers={"Host": "evil.example"})
+            assert status == 403, path
+        # The same server, addressed the way a LAN client actually addresses it.
+        assert _get(base + "/")[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_allowed_hosts_name_the_names_the_server_is_reached_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server reached under a name the bind host does not cover (mDNS, a reverse
+    proxy) needs that named; every other hostname stays refused, and an IP address
+    -- which no rebinding attack can put in a browser's ``Host`` -- needs no naming."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    server = create_server("127.0.0.1", 0, allowed_hosts=["ui.internal", "Box.Local"])
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for host in (
+            "ui.internal",
+            "ui.internal:8765",
+            "UI.INTERNAL",
+            "box.local",
+            "localhost",
+            "app.localhost",
+            "192.168.1.5",
+            "[::1]",
+        ):
+            status, _, _ = _request(base + "/api/tools", headers={"Host": host})
+            assert status == 200, host
+        for host in ("evil.example", "evil.example:8765", "ui.internal.evil.example"):
+            status, _, _ = _request(base + "/api/tools", headers={"Host": host})
+            assert status == 403, host
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_serves_html_page(web_base: str) -> None:
     status, body = _get(web_base + "/")
     assert status == 200

@@ -3,18 +3,26 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **S1**, **S2** and
-**P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **S1**, **S2**,
+**S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
 umask/root handling in `src/light_harness/tools/workspace.py` (regression tests in
-`tests/test_workspace.py`), and the persona `SOUL.md` round-trip: the web UI now reads and
+`tests/test_workspace.py`), the persona `SOUL.md` round-trip: the web UI now reads and
 writes `personas/<name>/SOUL.md`, the file the prompt is taken from, instead of only the
 config value that seeds it (`src/light_harness/web.py`, `persona_soul_text` /
 `write_persona_soul` in `src/light_harness/config.py`; regression tests in
-`tests/test_web.py` and `tests/test_config.py`). Everything below still describes
-`f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 169 passed, `ruff` and `mypy` clean.
+`tests/test_web.py` and `tests/test_config.py`), and the header/caching/`Host` hardening of
+both HTTP servers: `--cors-origin` is validated to `*` or a bare `http(s)://host[:port]`
+before it is ever echoed into a header (`_validated_cors_origin` in `src/light_harness/web.py`),
+every `/api/*` response now carries `Cache-Control: no-store`, and the `Host` allow-list is
+shared by both servers (`host_allow_list` / `host_is_allowed` in `src/light_harness/httputil.py`)
+instead of being skipped on a wildcard bind — the webhook server had none at all, and a name
+the bind host does not cover now has to be named with the new `--allowed-host` option on
+`agent web` / `agent webhooks` (regression tests in `tests/test_web.py` and
+`tests/test_webhooks.py`; README access-control sections updated). Everything below still
+describes `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line
+numbers are pre-fix. Current baseline: `uv run pytest -q` 175 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -40,7 +48,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| S3 | `web.py` | CRLF injection through `--cors-origin`; secrets served without `Cache-Control` | medium | yes |
 | D1 | `README.md`, `webhooks.py` | Docs say POST returns the agent's answer; code acks immediately | medium | yes |
 | C1 | `tools/__init__.py` | 60 s tool timeout cannot interrupt sync-blocking tools | medium | yes |
 | B2 | `tools/builtin.py` | Non-string `edit_file` entries silently dropped | low | yes |
@@ -52,19 +59,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### S3 — Header injection and caching on the config API
-
-- `--cors-origin` is interpolated into `Access-Control-Allow-Origin` without validation. Verified: an
-  origin containing `\r\n` produced an injected `Access-Control-Allow-Credentials: true` — credentialed
-  cross-origin access to an API that returns API keys and webhook secrets.
-- API responses containing secrets are sent with no `Cache-Control` — `no-store` is set only for the
-  served page (`web.py:871`), not for `/api`. Verified.
-- The Host allow-list (`web.py:745-746`) is skipped on wildcard binds, which the README documents as the
-  DNS-rebinding posture for `--host 0.0.0.0`; combined with CORS `*` and secrets in JSON, that is the
-  practical chain to token theft. The webhook server has no Host guard at all. Open (unauthenticated)
-  webhooks are triggerable from any browser page; authenticated ones are not, because a simple cross-origin
-  POST cannot carry `Authorization`.
 
 ### C1 — The 60-second tool timeout is unenforceable for the file tools
 

@@ -511,7 +511,7 @@ def _chunked_request(
     chunks: list[str], path: str = "/hooks/open", extra: dict[str, str] | None = None
 ) -> bytes:
     """Raw request bytes for a chunked POST; ``chunks`` are the chunk payloads."""
-    lines = [f"POST {path} HTTP/1.1", "Host: x", "Transfer-Encoding: chunked"]
+    lines = [f"POST {path} HTTP/1.1", "Host: 127.0.0.1", "Transfer-Encoding: chunked"]
     lines += [f"{name}: {value}" for name, value in (extra or {}).items()]
     request = "\r\n".join(lines) + "\r\n\r\n"
     for chunk in chunks:
@@ -519,10 +519,77 @@ def _chunked_request(
     return (request + "0\r\n\r\n").encode()
 
 
+def test_webhooks_reject_a_foreign_host_header(webhook_server) -> None:
+    """S3: the webhook server had no Host check at all, so a page whose hostname has
+    been made to resolve to 127.0.0.1 (DNS rebinding) could trigger every
+    unauthenticated webhook from a browser."""
+    url, client = webhook_server
+    for method in ("POST", "GET", "OPTIONS"):
+        request = f"{method} /hooks/open HTTP/1.1\r\nHost: evil.example\r\n\r\n".encode()
+        status, headers = _raw_request(url, request)
+        assert status == 403, method
+        assert headers["content-type"] == "application/json"
+    assert client.prompts == []
+    # The same webhook, addressed the way its sender really addresses it, still runs.
+    assert _post(url + "/hooks/open", b"hello")[0] == 200
+    _wait_for_prompts(client)
+    assert client.prompts == ["hello"]
+
+
+def test_webhooks_answer_only_for_hosts_the_operator_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A webhook behind a reverse proxy is reached under a name the bind host does not
+    cover; naming it admits that name, and every other hostname stays refused."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(
+        tmp_path,
+        """
+        agents:
+          - name: assistant
+            provider: local
+            model: m
+            tools: []
+        webhooks:
+          - path: /hooks/open
+            agent: assistant
+        """,
+    )
+    config = Config.load()
+    client = CapturingClient()
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        return Agent(client, build_tool_registry(agent_cfg.tools), system_prompt="sp")
+
+    server = create_webhook_server(
+        config, "127.0.0.1", 0, agent_factory=factory, allowed_hosts=["hooks.internal"]
+    )
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for host, expected in (
+            ("hooks.internal", 200),
+            ("HOOKS.INTERNAL:8787", 200),
+            ("127.0.0.1", 200),
+            ("evil.example", 403),
+        ):
+            request = (
+                f"POST /hooks/open HTTP/1.1\r\nHost: {host}\r\nContent-Length: 5\r\n\r\nhello"
+            ).encode()
+            assert _raw_request(url, request)[0] == expected, host
+        _wait_for_prompts(client, 3)
+        assert client.prompts == ["hello"] * 3
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_webhook_rejects_oversized_body_without_reading_it(webhook_server) -> None:
     url, client = webhook_server
     status, headers = _raw_request(
-        url, b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: 10485760\r\n\r\n"
+        url, b"POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 10485760\r\n\r\n"
     )
     assert status == 413
     # The oversized body is left on the socket, so the connection cannot be reused.
@@ -533,9 +600,8 @@ def test_webhook_rejects_oversized_body_without_reading_it(webhook_server) -> No
 @pytest.mark.parametrize("value", ["abc", "-5"])
 def test_webhook_rejects_malformed_content_length(webhook_server, value: str) -> None:
     url, client = webhook_server
-    status, headers = _raw_request(
-        url, f"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: {value}\r\n\r\n".encode()
-    )
+    request = f"POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {value}\r\n\r\n"
+    status, headers = _raw_request(url, request.encode())
     assert status == 400
     assert headers["connection"] == "close"
     assert client.prompts == []
@@ -560,7 +626,7 @@ def test_chunked_outranks_content_length(webhook_server) -> None:
 def test_chunk_size_extensions_and_trailers_are_tolerated(webhook_server) -> None:
     url, client = webhook_server
     request = (
-        b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n"
         b"5;name=v\r\nhello\r\n0\r\nX-Trailer: yes\r\n\r\n"
     )
     assert _raw_request(url, request)[0] == 200
@@ -573,7 +639,7 @@ def test_chunked_body_over_the_limit_is_refused_without_running(webhook_server) 
     it, and the bytes left on the socket force the close."""
     url, client = webhook_server
     request = (
-        "POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n"
         f"{1024 * 1024 + 1:x}\r\n"
     ).encode()
     status, headers = _raw_request(url, request)
@@ -586,7 +652,7 @@ def test_chunked_body_over_the_limit_is_refused_without_running(webhook_server) 
 def test_malformed_chunk_size_is_refused(webhook_server, size_field: str) -> None:
     url, client = webhook_server
     request = (
-        "POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n"
         f"{size_field}\r\nhello\r\n"
     ).encode()
     status, headers = _raw_request(url, request)
@@ -598,7 +664,7 @@ def test_malformed_chunk_size_is_refused(webhook_server, size_field: str) -> Non
 def test_transfer_encoding_other_than_chunked_is_refused(webhook_server) -> None:
     url, client = webhook_server
     request = (
-        b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n"
+        b"POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: gzip\r\n"
         b"Content-Length: 5\r\n\r\nhello"
     )
     status, headers = _raw_request(url, request)
@@ -614,7 +680,7 @@ def test_chunked_body_is_consumed_so_the_connection_can_be_reused(
     connection gets the leftover chunk bytes as its own request line."""
     monkeypatch.setattr(WebhookHandler, "protocol_version", "HTTP/1.1")  # keep-alive
     url, client = webhook_server
-    follow_up = b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi"
+    follow_up = b"POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\nhi"
     with _connect(url) as s:
         stream = s.makefile("rb")
         s.sendall(_chunked_request(["hello"]) + follow_up)
@@ -634,8 +700,8 @@ def test_body_left_unread_closes_the_connection(
     with _connect(url) as s:
         stream = s.makefile("rb")
         s.sendall(
-            b"POST /hooks/nope HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"
-            b"POST /hooks/open HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi"
+            b"POST /hooks/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\nhello"
+            b"POST /hooks/open HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\nhi"
         )
         status, headers = _read_response(stream)
         assert status == 404

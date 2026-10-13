@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
+from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlsplit
 
 MAX_BODY_BYTES = 1024 * 1024
 
@@ -30,6 +33,62 @@ def secret_matches(supplied: str, expected: str) -> bool:
         # (or an unencodable secret) can never match a wire value.
         return False
     return hmac.compare_digest(supplied_bytes, expected_bytes)
+
+
+_WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::"})
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_LOOPBACK_SUFFIX = ".localhost"
+
+
+def host_allow_list(bind_host: str, extra: Iterable[str] = ()) -> frozenset[str]:
+    """The hostnames a request's ``Host`` header may carry, on top of loopback
+    names, IP literals and the bind host itself (see :func:`host_is_allowed`).
+
+    ``extra`` is what the operator names explicitly: a mDNS name, the name a
+    reverse proxy forwards. A wildcard bind contributes no name of its own, but
+    it does not switch the check off -- that is where the check matters most,
+    because a browser on this machine can be made to reach the server under a
+    hostname an attacker controls.
+    """
+    names = set(_LOOPBACK_HOSTS) | {name.strip().lower() for name in extra if name.strip()}
+    if bind_host.strip() not in _WILDCARD_BINDS:
+        names.add(bind_host.strip().lower())
+    return frozenset(names)
+
+
+def host_is_allowed(handler: BaseHTTPRequestHandler, allowed_hosts: frozenset[str]) -> bool:
+    """True when the request's ``Host`` header names this server, rather than a
+    hostname that merely resolves to it.
+
+    Accepted: the names from :func:`host_allow_list` -- loopback names, the bind host,
+    and whatever the operator named -- plus ``*.localhost`` (which browsers resolve to
+    this machine) and any IP literal (LAN access by address). Everything else,
+    including a missing or unparseable ``Host``, is refused.
+
+    The refused shape is DNS rebinding: an attacker's page at ``evil.example``
+    whose DNS now answers ``127.0.0.1``, so the browser speaks to the local server
+    while still sending ``Host: evil.example``. Without this check it is served
+    the page that embeds the API token, and with that token it reads (and rewrites)
+    a config holding API keys and webhook secrets. The hostname is never used to
+    route anything here, so it is checked and nothing else.
+    """
+    raw = handler.headers.get("Host")
+    if raw is None:
+        return False
+    try:
+        hostname = urlsplit("//" + raw.strip()).hostname
+    except (ValueError, UnicodeError):
+        return False  # an invalid port or a host name that cannot be encoded
+    if hostname is None:
+        return False
+    hostname = hostname.rstrip(".")  # "localhost." is "localhost"
+    if hostname in allowed_hosts or hostname.endswith(_LOOPBACK_SUFFIX):
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
 
 
 class BodyError(Exception):

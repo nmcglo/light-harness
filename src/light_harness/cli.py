@@ -138,21 +138,50 @@ def web(
         str,
         typer.Option(
             "--cors-origin",
-            help="Access-Control-Allow-Origin for /api/* (empty disables CORS).",
+            help=(
+                "Access-Control-Allow-Origin for /api/*: '*' or a bare origin such as "
+                "https://ui.example[:port] (empty disables CORS)."
+            ),
         ),
     ] = "*",
+    allowed_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-host",
+            help=(
+                "Host name this server answers for, besides loopback names, IP "
+                "addresses and the bind host. Repeat for every name it is reached by."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Serve a web UI for viewing and editing the config file."""
-    serve_config(host=host, port=port, cors_origin=cors_origin)
+    try:
+        serve_config(
+            host=host, port=port, cors_origin=cors_origin, allowed_hosts=allowed_host or ()
+        )
+    except ValueError as exc:  # a --cors-origin that is not a valid origin
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
 
 
 @app.command()
 def webhooks(
     host: Annotated[str, typer.Option("--host", help="Bind host.")] = DEFAULT_HOST,
     port: Annotated[int, typer.Option("--port", help="Bind port.")] = DEFAULT_PORT,
+    allowed_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-host",
+            help=(
+                "Host name this server answers for, besides loopback names, IP "
+                "addresses and the bind host. Repeat for every name it is reached by."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Serve the configured webhook listeners (the ``webhooks:`` section)."""
-    serve_webhooks(_load_config(), host=host, port=port)
+    serve_webhooks(_load_config(), host=host, port=port, allowed_hosts=allowed_host or ())
 
 
 async def _run_agent(agent: Agent, prompt: str) -> None:

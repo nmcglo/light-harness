@@ -116,6 +116,7 @@ file (no extra dependencies; binds to `127.0.0.1` by default):
 uv run agent web                 # http://127.0.0.1:8765/
 uv run agent web --port 9000     # custom port
 uv run agent web --host 0.0.0.0  # expose beyond localhost
+uv run agent web --allowed-host box.local  # also answer for that name
 ```
 
 The page has a navigation sidebar (currently just **Config**) and a top bar
@@ -138,13 +139,23 @@ not open to arbitrary web pages even though CORS defaults to `*`:
 - Every `/api/*` request needs the per-launch token in an `X-Agent-Token` header.
   The token is embedded in the served page (which is sent with `Cache-Control:
   no-store` and no CORS headers, so other sites cannot read it) and printed at
-  startup for scripts. It changes on every launch.
-- The `Host` header must be `localhost`, `127.0.0.1`, `::1` or the bind host
-  (blocks DNS rebinding). This check is skipped when binding `0.0.0.0` / `::`.
+  startup for scripts. It changes on every launch. Every `/api/*` answer -- which
+  carries the config's API keys and webhook secrets -- is sent with `Cache-Control:
+  no-store` as well, so nothing in between can keep a copy.
+- The `Host` header must name this server: `localhost` or any `*.localhost`,
+  `127.0.0.1`, `::1`, the bind host, an IP address, or a name passed with
+  `--allowed-host` (repeat it for each name the server is reached by -- a mDNS
+  name, the name a reverse proxy forwards). This blocks DNS rebinding, and it
+  applies to a `0.0.0.0` / `::` bind too: that is the bind a browser can be talked
+  into reaching under a hostname an attacker controls.
 - `Access-Control-Allow-Origin` on `/api/*` is `*` by default; set
   `--cors-origin https://ui.example` to restrict it, or `--cors-origin ""` to
-  disable CORS. Note that with `*` the token is the only thing protecting the API:
-  anyone who obtains it (e.g. from the startup output) can call it from any origin.
+  disable CORS. The value must be `*` or a bare origin (`https://host[:port]`: no
+  path, no `user:pass@`, no whitespace) because it is echoed into a response
+  header verbatim -- anything else is refused at startup instead of becoming an
+  extra header on every `/api/*` response. Note that with `*` the token is the
+  only thing protecting the API: anyone who obtains it (e.g. from the startup
+  output) can call it from any origin.
 
 ## Webhook listeners
 
@@ -154,6 +165,12 @@ Each POST to a configured `path` runs that webhook's `agent` with the parsed
 request body (JSON is re-serialized; non-JSON is passed through as text) and
 returns the agent's answer. A webhook with a `secret` requires the request to
 carry `Authorization: Bearer <secret>`; others are unauthenticated.
+
+Every request must also carry a `Host` header that names the server -- a loopback
+name, an IP address, the bind host, or a name passed with `--allowed-host` (the
+name a reverse proxy forwards). A request under any other hostname gets 403 and
+no agent is run for it.
+
 A webhook may carry an optional `system_prompt`, which overrides the agent's
 default (persona-based) system prompt for that webhook's runs.
 
@@ -167,6 +184,7 @@ that does not exist cannot run at all.
 uv run agent webhooks                # http://127.0.0.1:8787/
 uv run agent webhooks --port 9001    # custom port
 uv run agent webhooks --host 0.0.0.0 # expose beyond localhost
+uv run agent webhooks --allowed-host hooks.example # behind a proxy at that name
 ```
 
 ## Extending it
