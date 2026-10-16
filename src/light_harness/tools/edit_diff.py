@@ -27,25 +27,78 @@ def split_bom(raw: str) -> tuple[str, str]:
     return "", raw
 
 
-def detect_line_ending(content: str) -> str:
-    """Return ``"\\r\\n"`` when CRLF occurs first, otherwise ``"\\n"``."""
-    crlf = content.find("\r\n")
-    lf = content.find("\n")
-    if lf == -1:
-        return "\n"
-    if crlf == -1:
-        return "\n"
-    return "\r\n" if crlf < lf else "\n"
+_LINE_ENDING = re.compile(r"\r\n|\r|\n")
+
+
+def line_endings_of(content: str) -> list[str]:
+    """The line ending (``"\\r\\n"``, ``"\\r"`` or ``"\\n"``) of each terminated
+    line of ``content``, in order; line ``i`` of the LF-normalized text has ending
+    ``endings[i]``. A final unterminated line has none."""
+    return _LINE_ENDING.findall(content)
 
 
 def normalize_to_lf(text: str) -> str:
     """Normalize every line ending to ``\\n``."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return _LINE_ENDING.sub("\n", text)
 
 
-def restore_line_endings(text: str, ending: str) -> str:
-    """Convert ``\\n`` back to ``ending`` (a no-op when ``ending`` is ``"\\n"``)."""
-    return text.replace("\n", "\r\n") if ending == "\r\n" else text
+def restore_line_endings(base: str, new: str, endings: list[str]) -> str:
+    """Give the lines of ``new`` back the endings the file had.
+
+    ``base`` is the LF-normalized original and ``endings`` its per-line endings
+    (:func:`line_endings_of`). A file with one ending throughout gets that ending
+    on every line, including inserted ones. In a file that mixes endings, lines
+    ``new`` shares with ``base`` keep their own ending, a rewritten line takes the
+    ending of the line it replaces, and an inserted line takes its predecessor's.
+    """
+    unique = set(endings)
+    if len(unique) <= 1:
+        ending = endings[0] if endings else "\n"
+        return new if ending == "\n" else new.replace("\n", ending)
+
+    base_lines = _split_lines_with_endings(base)
+    new_lines = _split_lines_with_endings(new)
+    # Edits are local: only align what lies between the common head and tail.
+    head = 0
+    limit = min(len(base_lines), len(new_lines))
+    while head < limit and base_lines[head] == new_lines[head]:
+        head += 1
+    tail = 0
+    while (
+        tail < limit - head and base_lines[-1 - tail] == new_lines[-1 - tail]
+    ):
+        tail += 1
+
+    default = endings[0]
+
+    def ending_at(i: int) -> str:
+        return endings[i] if 0 <= i < len(endings) else default
+
+    out: list[str] = []
+
+    def emit(j: int, ending: str) -> None:
+        line = new_lines[j]
+        out.append(line[:-1] + ending if line.endswith("\n") else line)
+
+    for j in range(head):
+        emit(j, ending_at(j))
+    base_mid_end = len(base_lines) - tail
+    new_mid_end = len(new_lines) - tail
+    matcher = difflib.SequenceMatcher(
+        None, base_lines[head:base_mid_end], new_lines[head:new_mid_end], autojunk=False
+    )
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        i1, i2, j1, j2 = i1 + head, i2 + head, j1 + head, j2 + head
+        for offset, j in enumerate(range(j1, j2)):
+            if tag == "equal":
+                emit(j, ending_at(i1 + offset))
+            elif tag == "replace":
+                emit(j, ending_at(min(i1 + offset, i2 - 1)))
+            else:  # insert
+                emit(j, ending_at(i1 - 1))
+    for k in range(tail):
+        emit(new_mid_end + k, ending_at(base_mid_end + k))
+    return "".join(out)
 
 
 def normalize_for_fuzzy_match(text: str) -> str:

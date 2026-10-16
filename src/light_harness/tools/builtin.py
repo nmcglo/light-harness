@@ -23,8 +23,8 @@ from .base import Tool
 from .edit_diff import (
     EditError,
     apply_edits,
-    detect_line_ending,
     generate_diff,
+    line_endings_of,
     normalize_to_lf,
     restore_line_endings,
     split_bom,
@@ -426,10 +426,10 @@ class EditFileTool:
             return f"Error: {path} is not valid UTF-8 text."
         try:
             bom, content = split_bom(raw)
-            ending = detect_line_ending(content)
+            endings = line_endings_of(content)
             normalized = normalize_to_lf(content)
             base, new = apply_edits(normalized, edits, path)
-            final = bom + restore_line_endings(new, ending)
+            final = bom + restore_line_endings(base, new, endings)
             data = final.encode("utf-8")
             if len(data) > _MAX_FILE_BYTES:
                 return f"Error: edited file would exceed the {_format_size(_MAX_FILE_BYTES)} limit."

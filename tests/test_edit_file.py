@@ -137,3 +137,42 @@ def test_unique_exact_match_is_not_rejected_as_a_fuzzy_duplicate(ws: Path) -> No
 
     assert "Successfully replaced" in result
     assert target.read_text() == "bye \nhello\n"
+
+
+def _edit_bytes(ws: Path, original: bytes, **edit: object) -> tuple[str, bytes]:
+    target = ws / "notes.txt"
+    target.write_bytes(original)
+    result = _run(ws, path="notes.txt", **edit)
+    return result, target.read_bytes()
+
+
+def test_mixed_line_endings_survive_an_edit(ws: Path) -> None:
+    """Every newline used to be rewritten to whichever ending came first."""
+    original = b"one\r\ntwo\nthree\r\nfour\nfive\r\n"
+
+    result, after = _edit_bytes(ws, original, old_text="three", new_text="THREE")
+
+    assert "Successfully replaced" in result
+    assert after == b"one\r\ntwo\nTHREE\r\nfour\nfive\r\n"
+
+
+def test_edits_that_add_and_remove_lines_keep_the_other_endings(ws: Path) -> None:
+    original = b"a\r\nb\nc\r\nd\ne\r\n"
+
+    _, after = _edit_bytes(
+        ws,
+        original,
+        edits=[
+            {"old_text": "b\n", "new_text": ""},  # drop a LF line
+            {"old_text": "d", "new_text": "d\nd2"},  # grow a LF line
+        ],
+    )
+
+    assert after == b"a\r\nc\r\nd\nd2\ne\r\n"
+
+
+def test_uniform_cr_and_crlf_files_keep_their_ending(ws: Path) -> None:
+    _, cr = _edit_bytes(ws, b"a\rb\rc\r", old_text="b", new_text="b\nB")
+    assert cr == b"a\rb\rB\rc\r"
+    _, crlf = _edit_bytes(ws, b"a\r\nb\r\n", old_text="b", new_text="x\ny")
+    assert crlf == b"a\r\nx\r\ny\r\n"
