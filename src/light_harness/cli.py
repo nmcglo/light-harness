@@ -199,7 +199,7 @@ async def _run_agent(agent: Agent, prompt: str) -> None:
 
 async def _run_turn(agent: Agent, prompt: str) -> None:
     try:
-        console.print(await agent.run(prompt))
+        await _stream_turn(agent, prompt)
     except Exception as exc:  # noqa: BLE001 - report any failed run, not a traceback
         err_console.print(f"[red]Error:[/red] {_describe_failure(exc)}")
         raise typer.Exit(code=1) from None
@@ -209,6 +209,36 @@ def _describe_failure(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         return f"the model endpoint returned HTTP {exc.response.status_code}"
     return escape(f"{type(exc).__name__}: {exc}")
+
+
+async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> None:
+    """Run one turn, printing tokens as they arrive; a spinner shows until the first.
+    A client that does not stream still gets its final answer printed."""
+    status = console.status("[dim]thinking…[/dim]", spinner="dots")
+    status.start()
+    started = False
+
+    def begin() -> None:
+        nonlocal started
+        started = True
+        status.stop()
+        if label:
+            console.print("[bold green]●[/bold green] [dim]agent[/dim]")
+
+    def on_token(text: str) -> None:
+        if not started:
+            begin()
+        console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
+
+    try:
+        answer = await agent.run(prompt, on_token=on_token)
+    finally:
+        status.stop()
+    if not started:
+        begin()
+        console.print(answer, markup=False, highlight=False)
+    else:
+        console.print()
 
 
 async def _run_repl(agent: Agent) -> None:
@@ -232,10 +262,7 @@ async def _run_repl(agent: Agent) -> None:
         if line.lower() in {"/exit", "/quit"}:
             break
         try:
-            with console.status("[dim]thinking…[/dim]", spinner="dots"):
-                answer = await agent.run(line)
-            console.print("[bold green]●[/bold green] [dim]agent[/dim]")
-            console.print(answer)
+            await _stream_turn(agent, line, label=True)
         except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session
             err_console.print(f"[red]✗ Error:[/red] {_describe_failure(exc)}")
     console.print("\n[dim]bye 👋[/dim]")

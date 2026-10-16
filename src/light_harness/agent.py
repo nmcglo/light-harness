@@ -5,6 +5,8 @@ is exhausted.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .llm import ChatMessage, LLMClient
 from .sessions import SessionLog
 from .state import Conversation
@@ -35,7 +37,9 @@ class Agent:
         """Clear the conversation history (start a fresh session)."""
         self.conversation.reset()
 
-    async def run(self, user_input: str) -> str:
+    async def run(
+        self, user_input: str, on_token: Callable[[str], None] | None = None
+    ) -> str:
         """Run one turn of the loop and return the final assistant answer."""
         self._remember(ChatMessage(role="user", content=user_input))
 
@@ -44,8 +48,9 @@ class Agent:
                 ChatMessage(role="system", content=self.system_prompt),
                 *self.conversation.messages,
             ]
+            extra = {"on_token": on_token} if on_token is not None else {}
             response = await self.client.chat(
-                messages, tools=self.tools.tool_schemas() or None
+                messages, tools=self.tools.tool_schemas() or None, **extra
             )
 
             if response.tool_calls:

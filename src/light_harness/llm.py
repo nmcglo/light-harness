@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any, Protocol
 
 import httpx
@@ -57,8 +58,11 @@ class LLMClient(Protocol):
         self,
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> LLMResponse:
-        """Send ``messages`` (plus optional tool schemas) and return a response."""
+        """Send ``messages`` (plus optional tool schemas) and return a response.
+        With ``on_token``, ask for a streamed reply and call it with each text
+        delta as it arrives."""
         ...
 
     async def close(self) -> None:
@@ -174,20 +178,29 @@ class OpenAICompatibleClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def _post_with_retry(self, payload: dict[str, Any]) -> httpx.Response:
+    async def _post_with_retry(
+        self, payload: dict[str, Any], stream: bool = False
+    ) -> httpx.Response:
         """POST the chat request, retrying transient failures (connection errors,
-        429 and 5xx) with exponential backoff; other HTTP errors raise at once."""
+        429 and 5xx) with exponential backoff; other HTTP errors raise at once.
+        With ``stream`` the body is left unread and the caller must close it."""
         for attempt in range(_MAX_ATTEMPTS):
             last = attempt == _MAX_ATTEMPTS - 1
             try:
-                response = await self._client.post("/chat/completions", json=payload)
+                request = self._client.build_request("POST", "/chat/completions", json=payload)
+                response = await self._client.send(request, stream=stream)
             except httpx.TransportError:
                 if last:
                     raise
             else:
                 if response.status_code not in _RETRY_STATUSES or last:
-                    response.raise_for_status()
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError:
+                        await response.aclose()
+                        raise
                     return response
+                await response.aclose()
             await asyncio.sleep(self._retry_delay * 2**attempt)
         raise AssertionError("unreachable")  # pragma: no cover - loop always returns/raises
 
@@ -195,6 +208,7 @@ class OpenAICompatibleClient:
         self,
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self._settings.model,
@@ -204,11 +218,16 @@ class OpenAICompatibleClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        response = await self._post_with_retry(payload)
-        choice = _first_message(response)
+        if on_token is not None:
+            payload["stream"] = True
+            content, raw_calls = await self._read_stream(payload, on_token)
+        else:
+            choice = _first_message(await self._post_with_retry(payload))
+            content = choice.get("content") or ""
+            raw_calls = choice.get("tool_calls") or []
 
         tool_calls: list[ToolCall] = []
-        for raw in choice.get("tool_calls") or []:
+        for raw in raw_calls:
             call_id, name, arguments = _tool_call_fields(raw)
             args, error = _parse_tool_arguments(arguments)
             tool_calls.append(ToolCall(id=call_id, name=name, arguments=args, error=error))
@@ -216,8 +235,57 @@ class OpenAICompatibleClient:
         return LLMResponse(
             message=ChatMessage(
                 role="assistant",
-                content=choice.get("content") or "",
+                content=content,
                 tool_calls=tool_calls or None,
             ),
             tool_calls=tool_calls,
         )
+
+    async def _read_stream(
+        self, payload: dict[str, Any], on_token: Callable[[str], None]
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Consume an SSE chat completion, calling ``on_token`` for each content
+        delta. Returns the full content and the reassembled wire tool calls."""
+        response = await self._post_with_retry(payload, stream=True)
+        parts: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        try:
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    raise LLMError("the stream contains an invalid JSON event") from None
+                choices = chunk.get("choices") if isinstance(chunk, dict) else None
+                if not choices:
+                    if isinstance(chunk, dict) and chunk.get("error"):
+                        raise LLMError(f"the stream reported an error: {chunk['error']}")
+                    continue
+                delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                if not isinstance(delta, dict):
+                    continue
+                text = delta.get("content")
+                if text:
+                    parts.append(text)
+                    on_token(text)
+                for raw in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(
+                        raw.get("index", len(calls)),
+                        {"id": None, "function": {"name": "", "arguments": ""}},
+                    )
+                    if raw.get("id"):
+                        slot["id"] = raw["id"]
+                    function = raw.get("function") or {}
+                    if function.get("name"):
+                        slot["function"]["name"] += function["name"]
+                    if function.get("arguments"):
+                        slot["function"]["arguments"] += function["arguments"]
+        finally:
+            await response.aclose()
+        if not parts and not calls:
+            raise LLMError("the stream produced no content or tool calls")
+        return "".join(parts), [calls[i] for i in sorted(calls)]

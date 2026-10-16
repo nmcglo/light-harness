@@ -77,7 +77,7 @@ def test_home_env_file_supplies_the_api_key(home: Path) -> None:
             self.api_key = getattr(settings, "api_key", None)
 
         async def chat(
-            self, messages: list[ChatMessage], tools: list[dict] | None = None
+            self, messages: list[ChatMessage], tools: list[dict] | None = None, on_token=None
         ) -> LLMResponse:
             sent.append(messages)
             return LLMResponse(
@@ -112,7 +112,9 @@ def test_a_failed_one_shot_prompt_reports_an_error_and_exits_1(home: Path) -> No
         def __init__(self, settings: object) -> None:
             pass
 
-        async def chat(self, messages: list[ChatMessage], tools: object = None) -> LLMResponse:
+        async def chat(
+            self, messages: list[ChatMessage], tools: object = None, on_token=None
+        ) -> LLMResponse:
             raise RuntimeError("endpoint exploded")
 
         async def close(self) -> None:

@@ -295,10 +295,11 @@ def test_repl_survives_a_failed_turn(monkeypatch) -> None:
         def __init__(self) -> None:
             self.prompts: list[str] = []
 
-        async def run(self, prompt: str) -> str:
+        async def run(self, prompt: str, on_token=None) -> str:
             self.prompts.append(prompt)
             if prompt == "boom":
                 raise LLMError("the response has no choices")
+            on_token(f"answer to {prompt}")
             return f"answer to {prompt}"
 
     lines = iter(["boom", "again", "/exit"])
@@ -314,3 +315,43 @@ def test_repl_survives_a_failed_turn(monkeypatch) -> None:
     assert agent.prompts == ["boom", "again"]
     assert "answer to again" in printed
     assert any("no choices" in e for e in errors)
+
+
+def test_streamed_chat_reports_tokens_and_reassembles_tool_calls() -> None:
+    import json
+
+    import httpx
+
+    from light_harness.config import Settings
+    from light_harness.llm import ChatMessage, OpenAICompatibleClient
+
+    events = [
+        {"choices": [{"delta": {"content": "Hel"}}]},
+        {"choices": [{"delta": {"content": "lo"}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
+            "function": {"name": "add", "arguments": '{"a": 1,'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0,
+            "function": {"arguments": ' "b": 2}'}}]}}]},
+    ]
+    body = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    http = httpx.AsyncClient(base_url="http://llm.test/v1", transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(Settings(), client=http, retry_delay=0)
+    tokens: list[str] = []
+    try:
+        response = asyncio.run(
+            client.chat([ChatMessage(role="user", content="hi")], on_token=tokens.append)
+        )
+    finally:
+        asyncio.run(http.aclose())
+
+    assert seen[0]["stream"] is True
+    assert tokens == ["Hel", "lo"]
+    assert response.message.content == "Hello"
+    assert response.tool_calls[0].name == "add"
+    assert response.tool_calls[0].arguments == {"a": 1, "b": 2}
