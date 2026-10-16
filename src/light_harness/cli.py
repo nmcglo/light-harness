@@ -12,10 +12,20 @@ The commands are synchronous Typer commands that drive the async agent via
 from __future__ import annotations
 
 import asyncio
+import signal
+import sys
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Annotated
 
 import httpx
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import FileHistory, History, InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -25,6 +35,7 @@ from .config import (
     Config,
     ConfigError,
     Settings,
+    config_home,
     ensure_persona,
     load_default_dotenv,
     persona_sessions_dir,
@@ -199,10 +210,12 @@ async def _run_agent(agent: Agent, prompt: str) -> None:
 
 async def _run_turn(agent: Agent, prompt: str) -> None:
     try:
-        await _stream_turn(agent, prompt)
+        interrupted = await _stream_turn(agent, prompt)
     except Exception as exc:  # noqa: BLE001 - report any failed run, not a traceback
         err_console.print(f"[red]Error:[/red] {_describe_failure(exc)}")
         raise typer.Exit(code=1) from None
+    if interrupted:
+        raise typer.Exit(code=130)
 
 
 def _describe_failure(exc: Exception) -> str:
@@ -211,9 +224,12 @@ def _describe_failure(exc: Exception) -> str:
     return escape(f"{type(exc).__name__}: {exc}")
 
 
-async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> None:
+async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> bool:
     """Run one turn, printing tokens as they arrive; a spinner shows until the first.
-    A client that does not stream still gets its final answer printed."""
+    A client that does not stream still gets its final answer printed.
+
+    Ctrl-C while the turn runs cancels just this turn (the agent keeps what had
+    streamed so far in its history); returns True if the turn was interrupted."""
     status = console.status("[dim]thinking…[/dim]", spinner="dots")
     status.start()
     started = False
@@ -230,22 +246,146 @@ async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> Non
             begin()
         console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
 
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(agent.run(prompt, on_token=on_token))
+    interrupted = False
+
+    def interrupt() -> None:
+        nonlocal interrupted
+        interrupted = True
+        task.cancel()
+
     try:
-        answer = await agent.run(prompt, on_token=on_token)
+        loop.add_signal_handler(signal.SIGINT, interrupt)
+        handler_installed = True
+    except (NotImplementedError, ValueError, RuntimeError):  # e.g. Windows, non-main thread
+        handler_installed = False
+    try:
+        answer = await task
+    except asyncio.CancelledError:
+        if not interrupted:
+            raise
+        answer = None
     finally:
+        if handler_installed:
+            loop.remove_signal_handler(signal.SIGINT)
         status.stop()
+
+    if answer is None:
+        if started:
+            console.print()
+        console.print("[yellow]⏹ interrupted[/yellow]")
+        return True
     if not started:
         begin()
         console.print(answer, markup=False, highlight=False)
     else:
         console.print()
+    return False
 
 
-async def _run_repl(agent: Agent) -> None:
+_COMMANDS = {
+    "/help": "show the available commands",
+    "/clear": "forget the conversation so far",
+    "/tools": "list the tools the agent can use",
+    "/exit": "leave the chat",
+    "/quit": "leave the chat",
+}
+
+ReadLine = Callable[[], Awaitable[str]]
+
+
+class _CommandCompleter(Completer):
+    """Complete ``/commands`` only while the whole input is a single ``/word``, so
+    nothing pops up after a space or in the middle of a prompt."""
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        if not text.startswith("/") or any(c.isspace() for c in text):
+            return
+        for command, description in _COMMANDS.items():
+            if command.startswith(text.lower()) and command != text:
+                yield Completion(command, start_position=-len(text), display_meta=description)
+
+
+def _make_reader() -> ReadLine:
+    """Return an async line reader. On a terminal it is a prompt_toolkit session with
+    persistent history, slash-command completion and Alt-Enter for a newline;
+    otherwise (piped input) it falls back to plain ``console.input``."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+
+        async def plain() -> str:
+            return console.input("\n[bold cyan]❯[/bold cyan] ")
+
+        return plain
+
+    history: History
+    try:
+        path = config_home() / "history"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        history = FileHistory(str(path))
+    except OSError:
+        history = InMemoryHistory()
+    bindings = KeyBindings()
+
+    @bindings.add("escape", "enter")
+    def _newline(event: KeyPressEvent) -> None:
+        event.current_buffer.insert_text("\n")
+
+    session: PromptSession[str] = PromptSession(
+        history=history,
+        completer=_CommandCompleter(),
+        complete_while_typing=True,
+        key_bindings=bindings,
+        bottom_toolbar=" Enter send · Alt-Enter newline · / commands · Ctrl-D quit",
+        style=Style.from_dict(
+            {
+                # The default is a reverse-video bar; use dim grey text, no fill.
+                "bottom-toolbar": "noreverse bg:default fg:#6c6c6c",
+                "bottom-toolbar.text": "noreverse bg:default fg:#6c6c6c",
+            }
+        ),
+    )
+
+    async def interactive() -> str:
+        console.print()
+        return await session.prompt_async(FormattedText([("bold ansicyan", "❯ ")]))
+
+    return interactive
+
+
+def _run_command(agent: Agent, line: str) -> bool:
+    """Handle a ``/command``; returns True when the REPL should exit."""
+    name = line.split()[0].lower()
+    if name in {"/exit", "/quit"}:
+        return True
+    if name == "/help":
+        for command, text in _COMMANDS.items():
+            console.print(f"  [cyan]{command:<7}[/cyan] [dim]{text}[/dim]")
+    elif name == "/clear":
+        agent.reset()
+        console.print("[dim]conversation cleared[/dim]")
+    elif name == "/tools":
+        specs = agent.tools.tool_schemas()
+        if not specs:
+            console.print("[dim]no tools enabled[/dim]")
+        for spec in specs:
+            fn = spec["function"]
+            console.print(f"  [bold]{fn['name']}[/bold] [dim]{escape(fn['description'])}[/dim]")
+    else:
+        console.print(f"[red]unknown command[/red] {escape(name)} [dim](try /help)[/dim]")
+    return False
+
+
+async def _run_repl(agent: Agent, read_line: ReadLine | None = None) -> None:
+    read_line = read_line or _make_reader()
     console.print(
         Panel(
             "Type a prompt and press [bold]Enter[/bold].  "
-            "[cyan]/exit[/cyan] or [cyan]/quit[/cyan] to leave.",
+            "[cyan]/help[/cyan] lists commands, [cyan]/exit[/cyan] leaves.  "
+            "[bold]Ctrl-C[/bold] stops a reply.",
             title="[bold magenta]light-harness[/bold magenta]",
             title_align="left",
             border_style="magenta",
@@ -254,13 +394,15 @@ async def _run_repl(agent: Agent) -> None:
     )
     while True:
         try:
-            line = console.input("\n[bold cyan]❯[/bold cyan] ").strip()
+            line = (await read_line()).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not line:
             continue
-        if line.lower() in {"/exit", "/quit"}:
-            break
+        if line.startswith("/"):
+            if _run_command(agent, line):
+                break
+            continue
         try:
             await _stream_turn(agent, line, label=True)
         except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session

@@ -5,6 +5,7 @@ is exhausted.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from .llm import ChatMessage, LLMClient
@@ -13,6 +14,7 @@ from .state import Conversation
 from .tools import ToolRegistry
 
 _STOPPED_MESSAGE = "Stopped: reached the maximum number of steps without a final answer."
+_INTERRUPTED_MARK = "\n[interrupted by user]"
 
 
 class Agent:
@@ -40,7 +42,32 @@ class Agent:
     async def run(
         self, user_input: str, on_token: Callable[[str], None] | None = None
     ) -> str:
-        """Run one turn of the loop and return the final assistant answer."""
+        """Run one turn of the loop and return the final assistant answer.
+
+        If the turn is cancelled, the conversation is rolled back to a state the
+        model can continue from: the user message, then an assistant message with
+        whatever text had streamed so far plus an interruption marker (no dangling
+        tool calls). The cancellation is then re-raised."""
+        start = len(self.conversation.messages)
+        streamed: list[str] = []
+
+        def tap(text: str) -> None:
+            streamed.append(text)
+            if on_token is not None:
+                on_token(text)
+
+        try:
+            return await self._loop(user_input, tap if on_token is not None else None)
+        except asyncio.CancelledError:
+            del self.conversation.messages[start + 1 :]
+            self._remember(
+                ChatMessage(role="assistant", content="".join(streamed) + _INTERRUPTED_MARK)
+            )
+            raise
+
+    async def _loop(
+        self, user_input: str, on_token: Callable[[str], None] | None
+    ) -> str:
         self._remember(ChatMessage(role="user", content=user_input))
 
         for _ in range(self.max_steps):

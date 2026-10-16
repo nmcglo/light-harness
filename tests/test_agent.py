@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from light_harness.agent import Agent
 from light_harness.llm import ChatMessage, LLMResponse, ToolCall
@@ -355,3 +356,89 @@ def test_streamed_chat_reports_tokens_and_reassembles_tool_calls() -> None:
     assert response.message.content == "Hello"
     assert response.tool_calls[0].name == "add"
     assert response.tool_calls[0].arguments == {"a": 1, "b": 2}
+
+
+def test_cancelled_turn_leaves_a_consistent_history() -> None:
+    from light_harness.agent import Agent
+    from light_harness.llm import ChatMessage, LLMResponse, ToolCall
+    from light_harness.tools import ToolRegistry
+
+    class SlowTool:
+        async def chat(self, messages, tools=None, on_token=None):
+            on_token("partial ")
+            call = ToolCall(id="c1", name="slow", arguments={})
+            return LLMResponse(
+                message=ChatMessage(role="assistant", content="partial ", tool_calls=[call]),
+                tool_calls=[call],
+            )
+
+        async def close(self) -> None: ...
+
+    class Hang(ToolRegistry):
+        async def run(self, name, arguments):
+            await asyncio.Event().wait()
+
+    async def scenario() -> Agent:
+        agent = Agent(SlowTool(), Hang())  # type: ignore[arg-type]
+        task = asyncio.ensure_future(agent.run("go", on_token=lambda _t: None))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return agent
+
+    agent = asyncio.run(scenario())
+
+    roles = [m.role for m in agent.conversation.messages]
+    assert roles == ["user", "assistant"]  # no dangling tool_calls
+    last = agent.conversation.messages[-1]
+    assert last.tool_calls is None
+    assert last.content.startswith("partial ") and "interrupted" in last.content
+
+
+def test_repl_slash_commands_do_not_reach_the_model(monkeypatch) -> None:
+    from light_harness import cli
+
+    class Stub:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.resets = 0
+            self.tools = type("T", (), {"tool_schemas": lambda self: []})()
+
+        async def run(self, prompt: str, on_token=None) -> str:
+            self.prompts.append(prompt)
+            return "ok"
+
+        def reset(self) -> None:
+            self.resets += 1
+
+    lines = iter(["exit", "/clear", "/bogus", "/help", "/EXIT"])
+
+    async def read() -> str:
+        return next(lines)
+
+    monkeypatch.setattr(cli.console, "print", lambda *a, **_k: None)
+    agent = Stub()
+
+    asyncio.run(cli._run_repl(agent, read))  # type: ignore[arg-type]
+
+    assert agent.prompts == ["exit"]  # a bare "exit" is just a prompt
+    assert agent.resets == 1
+
+
+def test_command_completer_only_offers_commands_for_a_lone_slash_word() -> None:
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+
+    from light_harness import cli
+
+    def offered(text: str) -> list[str]:
+        completer = cli._CommandCompleter()
+        return [c.text for c in completer.get_completions(Document(text), CompleteEvent())]
+
+    assert offered("/") == list(cli._COMMANDS)
+    assert offered("/he") == ["/help"]
+    assert offered("") == []
+    assert offered("hello ") == []
+    assert offered("/help ") == []
+    assert offered("say /he") == []

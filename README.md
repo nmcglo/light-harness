@@ -25,6 +25,12 @@ uv run agent web             # edit the config in a local web UI
 uv run agent webhooks          # serve the configured webhook listeners
 ```
 
+In the REPL, replies stream in as they are generated. Input history persists in
+`$LIGHT_HARNESS_HOME/history` (arrow keys, Ctrl-R), Alt-Enter inserts a newline, and
+Ctrl-C stops the current reply without leaving the chat (the partial reply stays in
+the conversation). Commands start with `/` (Tab completes them): `/help`, `/clear`,
+`/tools`, `/exit` (or `/quit`). Anything else is sent to the model.
+
 Run the checks:
 
 ```sh
