@@ -508,18 +508,22 @@ def test_load_dotenv_sets_missing_without_overriding(
     monkeypatch.delenv("AGENT_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_BASE_URL", raising=False)
     monkeypatch.delenv("AGENT_TIMEOUT", raising=False)
-    monkeypatch.setenv("AGENT_MODEL", "already-set")
-    applied = load_dotenv(env)
     import os
+    from unittest import mock
 
-    assert sorted(applied) == ["AGENT_API_KEY", "AGENT_BASE_URL", "AGENT_TIMEOUT"]
-    assert os.environ["AGENT_API_KEY"] == "from-file"
-    assert os.environ["AGENT_BASE_URL"] == "http://x/v1"
-    assert os.environ["AGENT_TIMEOUT"] == "30"
-    assert os.environ["AGENT_MODEL"] == "already-set"  # env wins over .env
-    for key in ("AGENT_API_KEY", "AGENT_BASE_URL", "AGENT_TIMEOUT"):
-        monkeypatch.delenv(key)
-    assert load_dotenv(tmp_path / "missing.env") == []
+    # load_dotenv writes straight into os.environ; patch.dict puts the whole
+    # environment back afterwards so nothing leaks into later tests.
+    with mock.patch.dict(os.environ):
+        monkeypatch.setenv("AGENT_MODEL", "already-set")
+        applied = load_dotenv(env)
+
+        assert sorted(applied) == ["AGENT_API_KEY", "AGENT_BASE_URL", "AGENT_TIMEOUT"]
+        assert os.environ["AGENT_API_KEY"] == "from-file"
+        assert os.environ["AGENT_BASE_URL"] == "http://x/v1"
+        assert os.environ["AGENT_TIMEOUT"] == "30"
+        assert os.environ["AGENT_MODEL"] == "already-set"  # env wins over .env
+        assert load_dotenv(tmp_path / "missing.env") == []
+    assert "AGENT_API_KEY" not in os.environ
 
 
 def test_system_prompt_for_rejects_unsafe_persona_name(
@@ -531,3 +535,35 @@ def test_system_prompt_for_rejects_unsafe_persona_name(
     with pytest.raises(ValueError, match="invalid persona name"):
         config.system_prompt_for(AgentConfig(name="a", persona="../evil"))
     assert not (tmp_path.parent / "evil").exists()
+
+
+def test_default_dotenv_prefers_env_then_cwd_then_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``./.env`` outranks the home file, and may itself say where home is."""
+    import os
+    from unittest import mock
+
+    from light_harness.config import load_default_dotenv
+
+    project = tmp_path / "project"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (project / ".env").write_text(
+        f"LIGHT_HARNESS_HOME={home}\nBOTH=from-cwd\nONLY_CWD=c\nFROM_ENV=file\n",
+        encoding="utf-8",
+    )
+    (home / ".env").write_text("BOTH=from-home\nONLY_HOME=h\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    with mock.patch.dict(os.environ):
+        for name in ("LIGHT_HARNESS_HOME", "BOTH", "ONLY_CWD", "ONLY_HOME"):
+            os.environ.pop(name, None)
+        os.environ["FROM_ENV"] = "real"
+
+        applied = load_default_dotenv()
+
+        assert sorted(applied) == ["BOTH", "LIGHT_HARNESS_HOME", "ONLY_CWD", "ONLY_HOME"]
+        assert os.environ["BOTH"] == "from-cwd"
+        assert os.environ["ONLY_HOME"] == "h"  # found through the cwd file's HOME
+        assert os.environ["FROM_ENV"] == "real"

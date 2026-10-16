@@ -176,6 +176,18 @@ def load_dotenv(path: Path | None = None) -> list[str]:
     return applied
 
 
+def load_default_dotenv() -> list[str]:
+    """Load ``./.env`` and then ``<LIGHT_HARNESS_HOME>/.env`` into the environment.
+
+    Variables already set win, so precedence is: the real environment, then
+    ``./.env`` (the project in front of you), then the home file. ``./.env`` goes
+    first because it may itself set ``LIGHT_HARNESS_HOME``, which decides where the
+    second file is. Returns every name that was set."""
+    applied = load_dotenv(Path(".env"))
+    applied += load_dotenv(config_home() / ".env")
+    return applied
+
+
 class ConfigError(ValueError):
     """The config file exists but cannot be used (unreadable, invalid YAML, wrong shape)."""
 

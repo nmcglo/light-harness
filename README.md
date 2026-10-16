@@ -15,7 +15,7 @@ models.
 
 ```sh
 uv sync --group dev        # create .venv, install deps, write uv.lock
-cp .env.example .env       # secrets referenced from config.yaml as $NAME; `agent` loads ./.env
+cp .env.example .env       # secrets referenced from config.yaml as $NAME; `agent` loads ./.env (and ~/.light-harness/.env)
 cp config.yaml.example ~/.light-harness/config.yaml   # then edit
 
 uv run agent tools         # list the built-in example tools
@@ -59,8 +59,10 @@ credentials. Secrets are pulled from the environment by interpolation (below).
 - **Config file**: `$LIGHT_HARNESS_HOME/config.yaml` (default home
   `$HOME/.light-harness/config.yaml`). See `config.yaml.example` for a template.
 - **Env var**: `LIGHT_HARNESS_HOME` overrides the config home directory.
-- **`.env`**: the CLI loads `./.env` (`KEY=VALUE` lines) at startup. Variables
-  already set in the environment win over the file.
+- **`.env`**: the CLI loads `./.env` and then `$LIGHT_HARNESS_HOME/.env`
+  (`KEY=VALUE` lines) at startup. Variables already set in the environment win
+  over both files, and `./.env` wins over the home file; `./.env` may itself set
+  `LIGHT_HARNESS_HOME`.
 - **Errors**: a config file that is not valid YAML (or whose top level is not a
   mapping) aborts the command with an error. Individual malformed entries
   (an agent without a name, a webhook without a `/` path, ...) are dropped and

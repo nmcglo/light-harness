@@ -75,9 +75,15 @@ after it (best effort for the directory), and `write_file` reports bytes, matchi
 and `close` now take a lock around write + flush (`src/light_harness/sessions.py`). The premise was
 weaker than listed — every session writes its own uniquely named file, so only threads sharing one
 `SessionLog` could interleave — and CPython's buffered writer did not corrupt lines in a stress run
-without the lock, so no regression test was kept. Everything below still describes
+without the lock, so no regression test was kept, and the `.env` note: the CLI now loads `./.env` and
+then `$LIGHT_HARNESS_HOME/.env` (`load_default_dotenv` in `src/light_harness/config.py`; the real
+environment still wins, then `./.env`, then the home file, and `./.env` may set `LIGHT_HARNESS_HOME`;
+README updated), the one test that leaked `AGENT_*` variables into later tests through
+`monkeypatch.delenv` now restores `os.environ` with `mock.patch.dict`, and the CLI has its first tests
+(`tests/test_cli.py`: startup, broken config, home `.env`, missing API key, failed one-shot prompt).
+Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 201 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 207 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -110,9 +116,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 - `state.py` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` are not called inside the
   package or by any test. **Kept deliberately** as public convenience API for code embedding `Agent`
   (`Conversation` is exported from `light_harness`); the `Conversation` docstring now says so.
-- `cli.py:45` `load_dotenv()` reads `./.env` from the current working directory (as documented), not
-  `LIGHT_HARNESS_HOME`; `config.py:145` writes parsed values into `os.environ`, so any test that reads env vars
-  after `test_config.py:466-492` is order-dependent. `cli.py` has no tests at all.
 - `generate_diff` runs `difflib.unified_diff` over up to 10 MB — `SequenceMatcher` is O(n²) worst
   case and `autojunk` can produce a misleading diff for large files. It now runs in the edit
   tool's worker thread, so it no longer stalls the event loop, but the write already happened

@@ -25,7 +25,7 @@ from .config import (
     ConfigError,
     Settings,
     ensure_persona,
-    load_dotenv,
+    load_default_dotenv,
     persona_sessions_dir,
 )
 from .llm import OpenAICompatibleClient
@@ -41,9 +41,10 @@ err_console = Console(stderr=True)
 
 @app.callback()
 def _main() -> None:
-    """Load ``./.env`` (without overriding variables already set) before any command."""
+    """Load ``./.env`` and ``$LIGHT_HARNESS_HOME/.env`` (without overriding variables
+    already set) before any command."""
     try:
-        load_dotenv()
+        load_default_dotenv()
     except ConfigError as exc:
         err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from None
