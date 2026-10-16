@@ -479,3 +479,53 @@ def test_tool_line_is_one_escaped_line_and_flags_errors() -> None:
     assert "\n" not in long and "line two" not in long and len(long) < 260
     assert "[red]" in tool_line("add", {}, "Error: nope")
     assert "[red]" not in ok
+
+
+def test_failures_are_described_with_an_actionable_hint() -> None:
+    import httpx
+
+    from light_harness import cli
+    from light_harness.llm import LLMError
+
+    request = httpx.Request("POST", "http://llm.test/v1/chat/completions")
+
+    def status(code: int) -> httpx.HTTPStatusError:
+        return httpx.HTTPStatusError(
+            "x", request=request, response=httpx.Response(code, request=request)
+        )
+
+    assert "api_key" in cli._describe_failure(status(401))
+    assert "api_key" in cli._describe_failure(status(403))
+    assert "rate limited" in cli._describe_failure(status(429))
+    assert "base_url" in cli._describe_failure(status(404))
+    assert "server error" in cli._describe_failure(status(503))
+    assert cli._describe_failure(status(418)).endswith("HTTP 418")
+    timeout = cli._describe_failure(httpx.ReadTimeout("slow", request=request))
+    assert "timed out" in timeout and "llm.test" in timeout
+    assert "could not reach llm.test" in cli._describe_failure(
+        httpx.ConnectError("refused", request=request)
+    )
+    assert cli._describe_failure(LLMError("the response has no choices")) == (
+        "the response has no choices"
+    )
+    assert cli._describe_failure(ValueError("[bold]x")).startswith("ValueError: \\[bold]x")
+
+
+def test_glyphs_fall_back_to_ascii_without_unicode(monkeypatch) -> None:
+    import io
+
+    from rich.console import Console
+
+    from light_harness.tui import ASCII, UNICODE, glyphs_for, is_interactive
+
+    def console(encoding: str, term: str = "xterm") -> Console:
+        stream = io.TextIOWrapper(io.BytesIO(), encoding=encoding)
+        return Console(file=stream, force_terminal=True, _environ={"TERM": term})
+
+    monkeypatch.delenv("TERM", raising=False)
+    assert glyphs_for(console("utf-8")) is UNICODE
+    assert glyphs_for(console("ascii")) is ASCII
+    monkeypatch.setenv("TERM", "dumb")
+    assert glyphs_for(console("utf-8")) is ASCII
+    assert not is_interactive(console("utf-8", term="dumb"))
+    assert all(str(v).isascii() for v in vars(ASCII).values())

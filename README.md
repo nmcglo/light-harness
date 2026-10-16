@@ -33,6 +33,11 @@ Ctrl-C stops the current reply without leaving the chat (the partial reply stays
 the conversation). Commands start with `/` (Tab completes them): `/help`, `/clear`,
 `/tools`, `/exit` (or `/quit`). Anything else is sent to the model.
 
+The UI degrades gracefully: with piped input/output or `TERM=dumb` it prints plain text
+(no spinner, panel or rule), on a non-UTF-8 terminal it swaps its symbols for ASCII, and
+`NO_COLOR` turns colors off. Failures name the likely fix (bad API key, rate limit,
+unreachable endpoint, timeout).
+
 Run the checks:
 
 ```sh

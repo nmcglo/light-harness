@@ -12,6 +12,7 @@ The commands are synchronous Typer commands that drive the async agent via
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 import time
@@ -41,10 +42,10 @@ from .config import (
     load_default_dotenv,
     persona_sessions_dir,
 )
-from .llm import OpenAICompatibleClient
+from .llm import LLMError, OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
-from .tui import TurnView
+from .tui import TurnView, glyphs_for, is_interactive
 from .web import serve_config
 from .webhooks import DEFAULT_HOST, DEFAULT_PORT, serve_webhooks
 
@@ -53,10 +54,20 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def _tolerate_unencodable_output() -> None:
+    """Replace characters the terminal's encoding cannot represent instead of
+    crashing on them (model replies and Markdown bullets are not always ASCII)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
+
+
 @app.callback()
 def _main() -> None:
     """Load ``./.env`` and ``$LIGHT_HARNESS_HOME/.env`` (without overriding variables
     already set) before any command."""
+    _tolerate_unencodable_output()
     try:
         load_default_dotenv()
     except ConfigError as exc:
@@ -221,8 +232,29 @@ async def _run_turn(agent: Agent, prompt: str) -> None:
 
 
 def _describe_failure(exc: Exception) -> str:
+    """A one-line, actionable description of why a turn failed (Rich markup-safe)."""
     if isinstance(exc, httpx.HTTPStatusError):
-        return f"the model endpoint returned HTTP {exc.response.status_code}"
+        status = exc.response.status_code
+        if status in (401, 403):
+            return f"authentication failed (HTTP {status}) -- check the provider's api_key"
+        if status == 404:
+            return "not found (HTTP 404) -- check the provider's base_url and the model name"
+        if status == 429:
+            return "rate limited (HTTP 429) -- wait a moment and try again"
+        if status >= 500:
+            return f"the model endpoint had a server error (HTTP {status}) -- try again shortly"
+        return f"the model endpoint returned HTTP {status}"
+    if isinstance(exc, httpx.TransportError):
+        try:
+            host = exc.request.url.host
+        except RuntimeError:  # httpx raises this when the exception has no request
+            host = ""
+        where = f" {host}" if host else " the model endpoint"
+        if isinstance(exc, httpx.TimeoutException):
+            return f"the request to{where} timed out -- it may be slow or unreachable"
+        return f"could not reach{where} -- check the provider's base_url and your network"
+    if isinstance(exc, LLMError):
+        return escape(str(exc))
     return escape(f"{type(exc).__name__}: {exc}")
 
 
@@ -254,7 +286,7 @@ async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> boo
         view.abort()
         if not interrupted:
             raise
-        console.print("[yellow]⏹ interrupted[/yellow]")
+        console.print(f"[yellow]{glyphs_for(console).stop} interrupted[/yellow]")
         return True
     except BaseException:
         view.abort()
@@ -296,12 +328,15 @@ def _make_reader() -> ReadLine:
     """Return an async line reader. On a terminal it is a prompt_toolkit session with
     persistent history, slash-command completion and Alt-Enter for a newline;
     otherwise (piped input) it falls back to plain ``console.input``."""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
 
         async def plain() -> str:
-            return console.input("\n[bold cyan]❯[/bold cyan] ")
+            return console.input(f"\n[bold cyan]{glyphs_for(console).prompt}[/bold cyan] ")
 
         return plain
+
+    glyphs = glyphs_for(console)
+    sep = glyphs.sep
 
     history: History
     try:
@@ -321,7 +356,9 @@ def _make_reader() -> ReadLine:
         completer=_CommandCompleter(),
         complete_while_typing=True,
         key_bindings=bindings,
-        bottom_toolbar=" Enter send · Alt-Enter newline · / commands · Ctrl-D quit",
+        bottom_toolbar=(
+            f" Enter send {sep} Alt-Enter newline {sep} / commands {sep} Ctrl-D quit"
+        ),
         style=Style.from_dict(
             {
                 "": "bold",  # what the user types stands out from the output
@@ -334,7 +371,9 @@ def _make_reader() -> ReadLine:
 
     async def interactive() -> str:
         console.print()
-        return await session.prompt_async(FormattedText([("bold ansicyan", "❯ ")]))
+        return await session.prompt_async(
+            FormattedText([("bold ansicyan", f"{glyphs.prompt} ")])
+        )
 
     return interactive
 
@@ -364,17 +403,20 @@ def _run_command(agent: Agent, line: str) -> bool:
 
 async def _run_repl(agent: Agent, read_line: ReadLine | None = None) -> None:
     read_line = read_line or _make_reader()
-    console.print(
-        Panel(
-            "Type a prompt and press [bold]Enter[/bold].  "
-            "[cyan]/help[/cyan] lists commands, [cyan]/exit[/cyan] leaves.  "
-            "[bold]Ctrl-C[/bold] stops a reply.",
-            title="[bold magenta]light-harness[/bold magenta]",
-            title_align="left",
-            border_style="magenta",
-            padding=(0, 2),
+    if is_interactive(console):
+        console.print(
+            Panel(
+                "Type a prompt and press [bold]Enter[/bold].  "
+                "[cyan]/help[/cyan] lists commands, [cyan]/exit[/cyan] leaves.  "
+                "[bold]Ctrl-C[/bold] stops a reply.",
+                title="[bold magenta]light-harness[/bold magenta]",
+                title_align="left",
+                border_style="magenta",
+                padding=(0, 2),
+            )
         )
-    )
+    else:
+        console.print("light-harness -- type a prompt, /help for commands, /exit to leave.")
     while True:
         try:
             line = (await read_line()).strip()
@@ -389,12 +431,15 @@ async def _run_repl(agent: Agent, read_line: ReadLine | None = None) -> None:
         try:
             started = time.monotonic()
             await _stream_turn(agent, line, label=True)
-            console.rule(
-                f"[dim]{time.monotonic() - started:.1f}s[/dim]", style="dim", align="right"
-            )
+            if is_interactive(console):
+                console.rule(
+                    f"[dim]{time.monotonic() - started:.1f}s[/dim]", style="dim", align="right"
+                )
         except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session
-            err_console.print(f"[red]✗ Error:[/red] {_describe_failure(exc)}")
-    console.print("\n[dim]bye 👋[/dim]")
+            err_console.print(
+                f"[red]{glyphs_for(err_console).error} Error:[/red] {_describe_failure(exc)}"
+            )
+    console.print(f"\n[dim]bye{glyphs_for(console).bye}[/dim]")
 
 
 if __name__ == "__main__":
