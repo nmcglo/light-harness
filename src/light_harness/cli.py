@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Annotated
 
@@ -43,6 +44,7 @@ from .config import (
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
+from .tui import TurnView
 from .web import serve_config
 from .webhooks import DEFAULT_HOST, DEFAULT_PORT, serve_webhooks
 
@@ -225,29 +227,15 @@ def _describe_failure(exc: Exception) -> str:
 
 
 async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> bool:
-    """Run one turn, printing tokens as they arrive; a spinner shows until the first.
-    A client that does not stream still gets its final answer printed.
+    """Run one turn, rendering the reply as Markdown while it streams in and
+    showing each tool call as a dim line. A client that does not stream still gets
+    its final answer printed.
 
     Ctrl-C while the turn runs cancels just this turn (the agent keeps what had
     streamed so far in its history); returns True if the turn was interrupted."""
-    status = console.status("[dim]thinking…[/dim]", spinner="dots")
-    status.start()
-    started = False
-
-    def begin() -> None:
-        nonlocal started
-        started = True
-        status.stop()
-        if label:
-            console.print("[bold green]●[/bold green] [dim]agent[/dim]")
-
-    def on_token(text: str) -> None:
-        if not started:
-            begin()
-        console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
-
+    view = TurnView(console, label=label)
     loop = asyncio.get_running_loop()
-    task = asyncio.ensure_future(agent.run(prompt, on_token=on_token))
+    task = asyncio.ensure_future(agent.run(prompt, on_token=view.token, on_tool=view.tool))
     interrupted = False
 
     def interrupt() -> None:
@@ -263,24 +251,18 @@ async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> boo
     try:
         answer = await task
     except asyncio.CancelledError:
+        view.abort()
         if not interrupted:
             raise
-        answer = None
+        console.print("[yellow]⏹ interrupted[/yellow]")
+        return True
+    except BaseException:
+        view.abort()
+        raise
     finally:
         if handler_installed:
             loop.remove_signal_handler(signal.SIGINT)
-        status.stop()
-
-    if answer is None:
-        if started:
-            console.print()
-        console.print("[yellow]⏹ interrupted[/yellow]")
-        return True
-    if not started:
-        begin()
-        console.print(answer, markup=False, highlight=False)
-    else:
-        console.print()
+    view.finish(answer)
     return False
 
 
@@ -342,9 +324,10 @@ def _make_reader() -> ReadLine:
         bottom_toolbar=" Enter send · Alt-Enter newline · / commands · Ctrl-D quit",
         style=Style.from_dict(
             {
+                "": "bold",  # what the user types stands out from the output
                 # The default is a reverse-video bar; use dim grey text, no fill.
-                "bottom-toolbar": "noreverse bg:default fg:#6c6c6c",
-                "bottom-toolbar.text": "noreverse bg:default fg:#6c6c6c",
+                "bottom-toolbar": "noreverse nobold bg:default fg:#6c6c6c",
+                "bottom-toolbar.text": "noreverse nobold bg:default fg:#6c6c6c",
             }
         ),
     )
@@ -404,7 +387,11 @@ async def _run_repl(agent: Agent, read_line: ReadLine | None = None) -> None:
                 break
             continue
         try:
+            started = time.monotonic()
             await _stream_turn(agent, line, label=True)
+            console.rule(
+                f"[dim]{time.monotonic() - started:.1f}s[/dim]", style="dim", align="right"
+            )
         except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session
             err_console.print(f"[red]✗ Error:[/red] {_describe_failure(exc)}")
     console.print("\n[dim]bye 👋[/dim]")

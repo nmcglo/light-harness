@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import Any
 
 from .llm import ChatMessage, LLMClient
 from .sessions import SessionLog
@@ -15,6 +16,8 @@ from .tools import ToolRegistry
 
 _STOPPED_MESSAGE = "Stopped: reached the maximum number of steps without a final answer."
 _INTERRUPTED_MARK = "\n[interrupted by user]"
+
+ToolCallback = Callable[[str, dict[str, Any], str], None]
 
 
 class Agent:
@@ -40,9 +43,15 @@ class Agent:
         self.conversation.reset()
 
     async def run(
-        self, user_input: str, on_token: Callable[[str], None] | None = None
+        self,
+        user_input: str,
+        on_token: Callable[[str], None] | None = None,
+        on_tool: ToolCallback | None = None,
     ) -> str:
         """Run one turn of the loop and return the final assistant answer.
+
+        ``on_token`` receives streamed text deltas; ``on_tool(name, arguments,
+        result)`` is called after each tool call completes.
 
         If the turn is cancelled, the conversation is rolled back to a state the
         model can continue from: the user message, then an assistant message with
@@ -57,7 +66,9 @@ class Agent:
                 on_token(text)
 
         try:
-            return await self._loop(user_input, tap if on_token is not None else None)
+            return await self._loop(
+                user_input, tap if on_token is not None else None, on_tool
+            )
         except asyncio.CancelledError:
             del self.conversation.messages[start + 1 :]
             self._remember(
@@ -66,7 +77,10 @@ class Agent:
             raise
 
     async def _loop(
-        self, user_input: str, on_token: Callable[[str], None] | None
+        self,
+        user_input: str,
+        on_token: Callable[[str], None] | None,
+        on_tool: ToolCallback | None,
     ) -> str:
         self._remember(ChatMessage(role="user", content=user_input))
 
@@ -96,6 +110,8 @@ class Agent:
                     self._remember(
                         ChatMessage(role="tool", tool_call_id=call.id, content=result)
                     )
+                    if on_tool is not None:
+                        on_tool(call.name, call.arguments, result)
             else:
                 final = response.message.content
                 self._remember(ChatMessage(role="assistant", content=final))

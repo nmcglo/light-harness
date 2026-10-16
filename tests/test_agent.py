@@ -296,7 +296,7 @@ def test_repl_survives_a_failed_turn(monkeypatch) -> None:
         def __init__(self) -> None:
             self.prompts: list[str] = []
 
-        async def run(self, prompt: str, on_token=None) -> str:
+        async def run(self, prompt: str, on_token=None, on_tool=None) -> str:
             self.prompts.append(prompt)
             if prompt == "boom":
                 raise LLMError("the response has no choices")
@@ -304,9 +304,13 @@ def test_repl_survives_a_failed_turn(monkeypatch) -> None:
             return f"answer to {prompt}"
 
     lines = iter(["boom", "again", "/exit"])
+    import io
+
+    from rich.console import Console
+
+    out = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=out, width=80))
     monkeypatch.setattr(cli.console, "input", lambda *_a, **_k: next(lines))
-    printed: list[str] = []
-    monkeypatch.setattr(cli.console, "print", lambda *a, **_k: printed.append(str(a[0])))
     errors: list[str] = []
     monkeypatch.setattr(cli.err_console, "print", lambda *a, **_k: errors.append(str(a[0])))
     agent = FlakyAgent()
@@ -314,7 +318,7 @@ def test_repl_survives_a_failed_turn(monkeypatch) -> None:
     asyncio.run(cli._run_repl(agent))  # type: ignore[arg-type]
 
     assert agent.prompts == ["boom", "again"]
-    assert "answer to again" in printed
+    assert "answer to again" in out.getvalue()
     assert any("no choices" in e for e in errors)
 
 
@@ -405,7 +409,7 @@ def test_repl_slash_commands_do_not_reach_the_model(monkeypatch) -> None:
             self.resets = 0
             self.tools = type("T", (), {"tool_schemas": lambda self: []})()
 
-        async def run(self, prompt: str, on_token=None) -> str:
+        async def run(self, prompt: str, on_token=None, on_tool=None) -> str:
             self.prompts.append(prompt)
             return "ok"
 
@@ -442,3 +446,36 @@ def test_command_completer_only_offers_commands_for_a_lone_slash_word() -> None:
     assert offered("hello ") == []
     assert offered("/help ") == []
     assert offered("say /he") == []
+
+
+def test_split_blocks_keeps_code_fences_and_partial_lines_together() -> None:
+    from light_harness.tui import split_blocks
+
+    assert split_blocks("one\n\ntwo\n\nthr") == (["one\n", "two\n"], "thr")
+    fenced = "intro\n\n```py\na = 1\n\nb = 2\n```\n\nafter"
+    assert split_blocks(fenced) == (["intro\n", "```py\na = 1\n\nb = 2\n```\n"], "after")
+    # An unclosed fence stays in the tail, blank lines and all.
+    assert split_blocks("```\nx\n\ny\n") == ([], "```\nx\n\ny\n")
+    assert split_blocks("\n\n\nhi") == ([], "hi")
+
+
+def test_agent_reports_each_tool_call_result() -> None:
+    from light_harness.agent import Agent
+
+    seen: list[tuple[str, dict, str]] = []
+    agent = Agent(FakeClient(), default_registry())
+    asyncio.run(agent.run("add", on_tool=lambda n, a, r: seen.append((n, a, r))))
+
+    assert seen == [("add", {"a": 2, "b": 3}, seen[0][2])]
+    assert "5" in seen[0][2]
+
+
+def test_tool_line_is_one_escaped_line_and_flags_errors() -> None:
+    from light_harness.tui import tool_line
+
+    ok = tool_line("add", {"a": 2, "b": 3}, "5")
+    assert "add(a=2, b=3)" in ok and "5" in ok
+    long = tool_line("echo", {"text": "x" * 200}, "line one\nline two" + "y" * 200)
+    assert "\n" not in long and "line two" not in long and len(long) < 260
+    assert "[red]" in tool_line("add", {}, "Error: nope")
+    assert "[red]" not in ok
