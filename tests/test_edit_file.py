@@ -112,3 +112,28 @@ def test_concurrent_edits_to_one_file_are_not_lost(ws: Path) -> None:
 
     assert all("Successfully replaced" in r for r in results)
     assert target.read_text() == "".join(f"line{i} new\n" for i in range(count))
+
+
+def test_fuzzy_noop_edit_is_refused_and_leaves_the_file_alone(ws: Path) -> None:
+    """With a smart quote in the file, ``old_text == new_text`` matched fuzzily and
+    the touched line was rewritten in ASCII, so the guard never fired."""
+    target = ws / "notes.txt"
+    original = "it\u2019s fine  \nother\n"
+    target.write_text(original, encoding="utf-8")
+
+    result = _run(ws, path="notes.txt", old_text="it's fine", new_text="it's fine")
+
+    assert "No changes made" in result
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_unique_exact_match_is_not_rejected_as_a_fuzzy_duplicate(ws: Path) -> None:
+    """``"hello "`` occurs once exactly; only its fuzzy form (no trailing space) is
+    ambiguous."""
+    target = ws / "notes.txt"
+    target.write_text("hello \nhello\n")
+
+    result = _run(ws, path="notes.txt", old_text="hello ", new_text="bye ")
+
+    assert "Successfully replaced" in result
+    assert target.read_text() == "bye \nhello\n"

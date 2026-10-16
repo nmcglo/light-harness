@@ -3,7 +3,7 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **C2**, **D1**, **L1**, **S1**, **S2**,
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **C2**, **D1**, **E2**, **L1**, **S1**, **S2**,
 **S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
@@ -41,9 +41,16 @@ response shape and raises `LLMError` (`src/light_harness/llm.py`) naming the pro
 an id or function name — instead of `IndexError`/`KeyError`/`ValueError`; `agent chat` reports a failed
 turn and keeps the REPL running, and a one-shot prompt prints the error and exits 1 (`src/light_harness/cli.py`);
 the connection-error retry and exponential backoff now have tests (`tests/test_agent.py`). Transport and HTTP
-status errors still surface as `httpx` exceptions. Everything below still describes
+status errors still surface as `httpx` exceptions, and **E2**: the "no changes made" guard in
+`apply_edits` (`src/light_harness/tools/edit_diff.py`) now compares each matched span with its
+replacement instead of comparing whole files, so a no-op edit that only matched fuzzily is refused instead
+of silently ASCII-fying the line, and a unique exact match such as `"hello "` in `"hello \nhello\n"` is no
+longer rejected as a fuzzy duplicate (regression tests in `tests/test_edit_file.py`); the
+`_apply_preserving_lines` docstring now says touched lines take the fuzzy normalization. Two E2 claims did
+not hold: the BOM is unchanged by an edit so its absence from the diff is correct, and
+`detect_line_ending("a\rb\r\nc")` returns CRLF. Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 190 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 192 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -69,25 +76,9 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| E2 | `edit_diff.py` | No-op guard can never fire in fuzzy mode | medium | inference |
 | S4 | `tools/workspace.py` | Deny check is lexical (case-insensitive FS) and blind to hardlinks | low | inference |
 | W2 | `web.py` | Unguarded `read_text`; inconsistent `ConfigError` handling | low | inference |
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
-
-## Medium
-
-### E2 — The "no changes made" guard can never fire in fuzzy mode
-
-`edit_diff.py:264-271` compares `base_content` (normalized) against `new_content`; `used_fuzzy` is only true
-when the two views already differ (`239`), so a no-op edit modulo normalization is accepted and the file is
-rewritten with the fuzzy-normalized version of every touched line (smart quotes → ASCII, trailing whitespace
-stripped). Also `190-193`'s docstring promises preservation of unchanged-line bytes, but `213` rewrites the
-whole touched line from the normalized view — the guarantee holds only outside the touched group. Fuzzy
-uniqueness (`249`) counts in fuzzy space, so a genuinely unique exact match can be rejected: content
-`"hello \nhello\n"` with `old_text="hello "` matches exactly once but counts as two. Line-ending handling
-differs between the two paths (`374-377`): the exact path re-serializes every newline to the single detected
-ending, so a mixed CRLF/LF file is converted wholesale, and `detect_line_endings` tie-breaking (`41-49`)
-picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized content, so it omits the BOM.
 
 ## Low
 
@@ -100,6 +91,10 @@ picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized con
   `UnicodeDecodeError` → no response, traceback in the server log. `ConfigError` is a `ValueError` subclass
   (`config.py:150`), so `web.py:822` turns a broken config into a 400, while the CLI aborts the command — the
   same input behaves differently in the two entry points.
+- **Mixed line endings (was part of E2)** — `edit_file` normalizes the whole file to LF and writes it back
+  with the single ending `detect_line_ending` found first, so a file mixing CRLF and LF (or lone `\r`)
+  comes back uniform after any edit. Unchanged by the E2 fix; fixing it needs per-line ending tracking
+  across edits that add or remove lines.
 - `edit_file`'s read block (`357-368`) has no generic `except OSError`, so `ENXIO`/`ELOOP` falls through to the
   registry catch-all as `Error: OSError: ...` instead of the tool's own message; `WriteFileTool` does catch
   `OSError` (`259`).

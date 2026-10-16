@@ -198,7 +198,9 @@ def _apply_preserving_lines(
 
     Each replacement is widened to the lines it touches; those lines are rewritten
     from ``base`` (with the replacements applied) and all other lines are copied
-    verbatim from ``original`` so unchanged line blocks keep their exact bytes.
+    verbatim from ``original``. Only lines outside every touched group keep their
+    exact bytes: a touched line also takes on the fuzzy normalization of ``base``
+    (smart quotes to ASCII, trailing whitespace stripped).
     """
     original_lines = _split_lines_with_endings(original)
     base_spans = _line_spans(_split_lines_with_endings(base))
@@ -255,13 +257,25 @@ def apply_edits(
 
     matched: list[MatchedEdit] = []
     for i, (o, n) in enumerate(normalized):
-        found, index, match_len, _uf, _cfr = _fuzzy_find(replacement_base, o)
+        found, index, match_len, matched_fuzzy, _cfr = _fuzzy_find(replacement_base, o)
         if not found:
             raise EditError(_not_found(path, i, total))
-        occurrences = _count_occurrences(replacement_base, o)
+        # An exact hit is counted exactly: counting in fuzzy space would call
+        # "hello " ambiguous in "hello \nhello\n" although it occurs once.
+        occurrences = (
+            _count_occurrences(replacement_base, o)
+            if matched_fuzzy
+            else replacement_base.count(o)
+        )
         if occurrences > 1:
             raise EditError(_duplicate(path, i, total, occurrences))
         matched.append((index, match_len, n, i))
+
+    # Decided here, on the matched spans, because once fuzzy matching is in play
+    # the rewritten lines are never byte-equal to the original (smart quotes,
+    # trailing whitespace), so comparing the final text could not detect a no-op.
+    if all(replacement_base[index : index + length] == new for index, length, new, _ in matched):
+        raise EditError(_no_change(path, total))
 
     matched.sort(key=lambda m: m[0])
     for i in range(1, len(matched)):
@@ -278,9 +292,6 @@ def apply_edits(
         new_content = _apply_preserving_lines(normalized_content, replacement_base, matched)
     else:
         new_content = _apply_replacements(replacement_base, matched)
-
-    if base_content == new_content:
-        raise EditError(_no_change(path, total))
 
     return base_content, new_content
 
