@@ -3,7 +3,7 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **C1**, **D1**, **S1**, **S2**,
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **D1**, **S1**, **S2**,
 **S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
@@ -28,9 +28,11 @@ existing path that is not a regular file — the FIFO behind the original repro 
 before anything opens it (`src/light_harness/tools/workspace.py`; regression tests in
 `tests/test_tool_timeout.py`; README caveats updated), and the **D1** documentation: the README
 and `webhooks.py` docstring now say a webhook POST is acknowledged at once and the agent's answer
-is not returned (the code was correct). Everything below still describes
+is not returned (the code was correct), and **B2**: `_prepare_edits` in
+`src/light_harness/tools/builtin.py` now rejects a malformed `edit_file` entry with a message naming
+it instead of dropping it (regression test in `tests/test_edit_file.py`). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 182 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 186 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -56,7 +58,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| B2 | `tools/builtin.py` | Non-string `edit_file` entries silently dropped | low | yes |
 | C2 | `tools/builtin.py` | No locking on read-modify-write | medium | inference |
 | L1 | `llm.py` | Unguarded response shape (`choices[0]`, malformed tool_call) | medium | inference |
 | E2 | `edit_diff.py` | No-op guard can never fire in fuzzy mode | medium | inference |
@@ -108,8 +109,6 @@ picks LF for `"a\rb\r\nc"`. The diff shown (`386`) is computed on normalized con
   `UnicodeDecodeError` → no response, traceback in the server log. `ConfigError` is a `ValueError` subclass
   (`config.py:150`), so `web.py:822` turns a broken config into a 400, while the CLI aborts the command — the
   same input behaves differently in the two entry points.
-- **B2** — `_prepare_edits` (`builtin.py:264-288`) drops entries whose `new_text` is not a string, so a request
-  that *did* send an edit reports "requires at least one replacement". Verified.
 - `edit_file`'s read block (`357-368`) has no generic `except OSError`, so `ENXIO`/`ELOOP` falls through to the
   registry catch-all as `Error: OSError: ...` instead of the tool's own message; `WriteFileTool` does catch
   `OSError` (`259`).

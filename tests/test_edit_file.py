@@ -66,3 +66,25 @@ def test_whitespace_inside_a_pattern_still_matches(ws: Path) -> None:
 
     assert "Successfully replaced" in result
     assert target.read_text() == "hello world\nthird line\n"
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [{"old_text": "second", "new_text": 5}],
+        [{"old_text": "second"}],
+        ["not an object"],
+        "not json",
+    ],
+)
+def test_malformed_edit_entries_are_reported_not_dropped(ws: Path, edits: object) -> None:
+    """An entry with a non-string field used to vanish, so the model was told it
+    had sent no replacement at all."""
+    target = ws / "notes.txt"
+    target.write_text(ORIGINAL)
+
+    result = _run(ws, path="notes.txt", edits=edits)
+
+    assert result.startswith("Error: edit_file:")
+    assert "at least one replacement" not in result
+    assert target.read_text() == ORIGINAL

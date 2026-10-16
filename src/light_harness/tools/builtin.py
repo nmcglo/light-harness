@@ -292,29 +292,36 @@ def _prepare_edits(arguments: dict[str, Any]) -> list[tuple[str, str]]:
     """Normalize the accepted edit argument forms into ``(old_text, new_text)`` pairs.
 
     Accepts ``edits`` as a list, a single ``{old_text, new_text}`` object, or a JSON
-    string, plus a top-level ``old_text``/``new_text`` shorthand.
+    string, plus a top-level ``old_text``/``new_text`` shorthand. Raises
+    ``ValueError`` naming the problem when an edit was sent but is malformed, rather
+    than dropping it.
     """
     edits = arguments.get("edits")
     if isinstance(edits, str):
         try:
             edits = json.loads(edits)
         except (ValueError, TypeError):
-            edits = None
+            raise ValueError("'edits' is a string that is not valid JSON") from None
     collected: list[tuple[str, str]] = []
     if isinstance(edits, dict):
         edits = [edits]
-    if isinstance(edits, list):
-        for entry in edits:
-            if isinstance(entry, dict):
-                old = entry.get("old_text")
-                new = entry.get("new_text")
-                if isinstance(old, str) and isinstance(new, str):
-                    collected.append((old, new))
-    old = arguments.get("old_text")
-    new = arguments.get("new_text")
-    if isinstance(old, str) and isinstance(new, str):
-        collected.append((old, new))
+    if edits is not None and not isinstance(edits, list):
+        raise ValueError("'edits' must be a list of {old_text, new_text} objects")
+    for index, entry in enumerate(edits or []):
+        collected.append(_edit_pair(entry, f"edits[{index}]"))
+    if "old_text" in arguments or "new_text" in arguments:
+        collected.append(_edit_pair(arguments, "old_text/new_text"))
     return collected
+
+
+def _edit_pair(entry: Any, where: str) -> tuple[str, str]:
+    if not isinstance(entry, dict):
+        raise ValueError(f"{where} must be an object with old_text and new_text")
+    old = entry.get("old_text")
+    new = entry.get("new_text")
+    if not isinstance(old, str) or not isinstance(new, str):
+        raise ValueError(f"{where} needs string old_text and new_text")
+    return old, new
 
 
 class EditFileTool:
@@ -379,7 +386,10 @@ class EditFileTool:
 
     def _run_blocking(self, arguments: dict[str, Any]) -> str:
         path = str(arguments["path"])
-        edits = _prepare_edits(arguments)
+        try:
+            edits = _prepare_edits(arguments)
+        except ValueError as exc:
+            return f"Error: edit_file: {exc}."
         if not edits:
             return (
                 "Error: edit_file requires at least one replacement "
