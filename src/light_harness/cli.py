@@ -18,6 +18,7 @@ import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.panel import Panel
 
 from .agent import Agent
 from .config import (
@@ -212,11 +213,18 @@ def _describe_failure(exc: Exception) -> str:
 
 async def _run_repl(agent: Agent) -> None:
     console.print(
-        "[bold]light-harness[/bold] -- type a prompt, or [italic]/exit[/italic] to quit."
+        Panel(
+            "Type a prompt and press [bold]Enter[/bold].  "
+            "[cyan]/exit[/cyan] or [cyan]/quit[/cyan] to leave.",
+            title="[bold magenta]light-harness[/bold magenta]",
+            title_align="left",
+            border_style="magenta",
+            padding=(0, 2),
+        )
     )
     while True:
         try:
-            line = console.input("[bold cyan]you>[/bold cyan] ").strip()
+            line = console.input("\n[bold cyan]❯[/bold cyan] ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not line:
@@ -224,10 +232,13 @@ async def _run_repl(agent: Agent) -> None:
         if line.lower() in {"/exit", "/quit"}:
             break
         try:
-            console.print(await agent.run(line))
+            with console.status("[dim]thinking…[/dim]", spinner="dots"):
+                answer = await agent.run(line)
+            console.print("[bold green]●[/bold green] [dim]agent[/dim]")
+            console.print(answer)
         except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session
-            err_console.print(f"[red]Error:[/red] {_describe_failure(exc)}")
-    console.print("bye")
+            err_console.print(f"[red]✗ Error:[/red] {_describe_failure(exc)}")
+    console.print("\n[dim]bye 👋[/dim]")
 
 
 if __name__ == "__main__":
