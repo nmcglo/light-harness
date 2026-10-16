@@ -12,7 +12,12 @@ from .llm import ChatMessage, ToolCall
 
 
 class Conversation(BaseModel):
-    """An ordered list of chat messages for a single session."""
+    """An ordered list of chat messages for a single session.
+
+    The agent loop itself only uses :meth:`add`. ``add_user``, ``add_assistant``,
+    ``add_tool`` and ``reset`` (and ``Agent.reset``) are kept as public conveniences
+    for code that embeds :class:`~light_harness.agent.Agent` and drives the history
+    directly; nothing inside the package calls them."""
 
     messages: list[ChatMessage] = Field(default_factory=list)
 

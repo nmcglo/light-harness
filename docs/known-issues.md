@@ -107,8 +107,9 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 ## Low
 
-- `state.py:23-34` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` (`agent.py:34-36`) are
-  unreachable API surface kept alive only by tests that do not exist.
+- `state.py` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` are not called inside the
+  package or by any test. **Kept deliberately** as public convenience API for code embedding `Agent`
+  (`Conversation` is exported from `light_harness`); the `Conversation` docstring now says so.
 - `cli.py:45` `load_dotenv()` reads `./.env` from the current working directory (as documented), not
   `LIGHT_HARNESS_HOME`; `config.py:145` writes parsed values into `os.environ`, so any test that reads env vars
   after `test_config.py:466-492` is order-dependent. `cli.py` has no tests at all.
