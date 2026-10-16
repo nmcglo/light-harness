@@ -301,7 +301,7 @@ def test_repl_survives_a_failed_turn(monkeypatch) -> None:
                 raise LLMError("the response has no choices")
             return f"answer to {prompt}"
 
-    lines = iter(["boom", "again", "exit"])
+    lines = iter(["boom", "again", "/exit"])
     monkeypatch.setattr(cli.console, "input", lambda *_a, **_k: next(lines))
     printed: list[str] = []
     monkeypatch.setattr(cli.console, "print", lambda *a, **_k: printed.append(str(a[0])))

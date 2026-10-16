@@ -212,7 +212,7 @@ def _describe_failure(exc: Exception) -> str:
 
 async def _run_repl(agent: Agent) -> None:
     console.print(
-        "[bold]light-harness[/bold] -- type a prompt, or [italic]exit[/italic] to quit."
+        "[bold]light-harness[/bold] -- type a prompt, or [italic]/exit[/italic] to quit."
     )
     while True:
         try:
@@ -221,7 +221,7 @@ async def _run_repl(agent: Agent) -> None:
             break
         if not line:
             continue
-        if line.lower() in {"exit", "quit"}:
+        if line.lower() in {"/exit", "/quit"}:
             break
         try:
             console.print(await agent.run(line))
