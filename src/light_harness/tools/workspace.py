@@ -18,8 +18,13 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock
+    fcntl = None  # type: ignore[assignment]
 
 
 class WorkspaceError(Exception):
@@ -98,3 +103,26 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+@contextlib.contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive advisory lock while a file is read-modified-written.
+
+    The lock is ``flock`` on the file's *directory*, not the file: writes replace
+    the file with a new inode, which would orphan a lock held on the old one, and a
+    sidecar lock file would litter the workspace. ``flock`` conflicts between
+    separate open descriptions, so it serializes threads of one process and
+    separate processes alike (``agent chat`` plus a webhook run). It is advisory,
+    so it only orders cooperating writers, and it is coarser than needed: edits to
+    different files in one directory take turns. A no-op where ``fcntl`` is missing.
+    """
+    if fcntl is None:  # pragma: no cover
+        yield
+        return
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock

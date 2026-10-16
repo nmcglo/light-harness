@@ -29,7 +29,7 @@ from .edit_diff import (
     restore_line_endings,
     split_bom,
 )
-from .workspace import Workspace, WorkspaceError, atomic_write_bytes
+from .workspace import Workspace, WorkspaceError, atomic_write_bytes, file_lock
 
 if TYPE_CHECKING:
     from . import ToolRegistry
@@ -280,7 +280,8 @@ class WriteFileTool:
         try:
             real = self._workspace.resolve(path)
             real.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(real, data)
+            with file_lock(real):
+                atomic_write_bytes(real, data)
         except WorkspaceError as exc:
             return f"Error: {exc}"
         except OSError as exc:
@@ -397,16 +398,28 @@ class EditFileTool:
             )
         try:
             real = self._workspace.resolve(path)
-            _check_size(real, path)
-            raw_bytes = real.read_bytes()
         except WorkspaceError as exc:
             return f"Error: {exc}"
+        try:
+            # The lock spans read → match → write, so a concurrent edit cannot be
+            # overwritten with a result computed from stale content.
+            with file_lock(real):
+                return self._edit_locked(real, path, edits)
         except FileNotFoundError:
             return f"Error: no such file: {path}"
         except IsADirectoryError:
             return f"Error: is a directory: {path}"
         except PermissionError:
             return f"Error: permission denied: {path}"
+        except OSError as exc:
+            return f"Error: {type(exc).__name__}: {exc}"
+
+    def _edit_locked(self, real: Path, path: str, edits: list[tuple[str, str]]) -> str:
+        try:
+            _check_size(real, path)
+            raw_bytes = real.read_bytes()
+        except WorkspaceError as exc:
+            return f"Error: {exc}"
         try:
             raw = raw_bytes.decode("utf-8")
         except UnicodeDecodeError:
@@ -423,8 +436,6 @@ class EditFileTool:
             atomic_write_bytes(real, data)
         except EditError as exc:
             return f"Error: {exc}"
-        except OSError as exc:
-            return f"Error: {type(exc).__name__}: {exc}"
         diff = generate_diff(base, new, path)
         return f"Successfully replaced {len(edits)} block(s) in {path}.\n{diff}"
 

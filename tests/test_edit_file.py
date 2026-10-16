@@ -88,3 +88,27 @@ def test_malformed_edit_entries_are_reported_not_dropped(ws: Path, edits: object
     assert result.startswith("Error: edit_file:")
     assert "at least one replacement" not in result
     assert target.read_text() == ORIGINAL
+
+
+def test_concurrent_edits_to_one_file_are_not_lost(ws: Path) -> None:
+    """Each edit reads, matches and rewrites the whole file; without a lock two
+    overlapping runs both start from the same content and the later write erases
+    the earlier one."""
+    import threading
+
+    count = 12
+    target = ws / "notes.txt"
+    target.write_text("".join(f"line{i} old\n" for i in range(count)))
+    results: list[str] = []
+
+    def work(i: int) -> None:
+        results.append(_run(ws, path="notes.txt", old_text=f"line{i} old", new_text=f"line{i} new"))
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert all("Successfully replaced" in r for r in results)
+    assert target.read_text() == "".join(f"line{i} new\n" for i in range(count))

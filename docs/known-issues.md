@@ -3,7 +3,7 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **D1**, **S1**, **S2**,
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **C2**, **D1**, **S1**, **S2**,
 **S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
@@ -30,9 +30,14 @@ before anything opens it (`src/light_harness/tools/workspace.py`; regression tes
 and `webhooks.py` docstring now say a webhook POST is acknowledged at once and the agent's answer
 is not returned (the code was correct), and **B2**: `_prepare_edits` in
 `src/light_harness/tools/builtin.py` now rejects a malformed `edit_file` entry with a message naming
-it instead of dropping it (regression test in `tests/test_edit_file.py`). Everything below still describes
+it instead of dropping it (regression test in `tests/test_edit_file.py`), and **C2**: `write_file` and
+`edit_file` now hold an exclusive `flock` on the file's directory (`file_lock` in
+`src/light_harness/tools/workspace.py`) across the whole read → match → write, so concurrent runs —
+threads or separate processes — no longer overwrite each other's edits (regression test in
+`tests/test_edit_file.py`; advisory, so it only orders the harness's own writers, and edits to
+different files in one directory take turns). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 186 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 187 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -58,7 +63,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| C2 | `tools/builtin.py` | No locking on read-modify-write | medium | inference |
 | L1 | `llm.py` | Unguarded response shape (`choices[0]`, malformed tool_call) | medium | inference |
 | E2 | `edit_diff.py` | No-op guard can never fire in fuzzy mode | medium | inference |
 | S4 | `tools/workspace.py` | Deny check is lexical (case-insensitive FS) and blind to hardlinks | low | inference |
@@ -66,13 +70,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### C2 — No locking on read-modify-write
-
-`builtin.py:359` read → `376` match → `381` write with no advisory lock, and `webhooks.py:86` builds a
-fresh registry per request against the same `agent_cfg.workspace_path()`. Two concurrent runs (`agent chat`
-plus a webhook, or two webhooks) editing the same file clobber each other, and the diff returned describes
-stale content.
 
 ### L1 — LLM response shape is unguarded
 
