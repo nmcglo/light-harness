@@ -65,8 +65,9 @@ text of a file with invalid YAML so the page can show what to fix, whereas the C
 lines keep theirs, a rewritten line takes the ending of the line it replaces, an inserted line its
 predecessor's — instead of rewriting every newline to the first one found; a file with a single
 ending, including lone `\r`, keeps it (regression tests in `tests/test_edit_file.py`; a mixed file
-is aligned with `difflib` over the lines between the unchanged head and tail, which is quadratic
-in the worst case). Everything below still describes
+in the worst case), and the `edit_file` read-block `OSError` note, which the C2 restructuring had already
+fixed (any `OSError` from the locked read-modify-write is reported as `Error: OSError: ...` by the tool;
+test added in `tests/test_edit_file.py`). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
 pre-fix. Current baseline: `uv run pytest -q` 198 passed, `ruff` and `mypy` clean.
 
@@ -98,9 +99,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 ## Low
 
-- `edit_file`'s read block (`357-368`) has no generic `except OSError`, so `ENXIO`/`ELOOP` falls through to the
-  registry catch-all as `Error: OSError: ...` instead of the tool's own message; `WriteFileTool` does catch
-  `OSError` (`259`).
 - `atomic_write_bytes`' "a crash never leaves a truncated file" holds for truncation (rename is atomic) but not
   durability — no `fsync`. `WriteFileTool` reports characters (`261`) while the limit is bytes (`_MAX_FILE_BYTES`).
 - `SessionLog.record` (`sessions.py:40`) has no lock; concurrent appends rely on OS atomicity.

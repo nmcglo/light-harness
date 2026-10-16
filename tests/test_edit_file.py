@@ -176,3 +176,24 @@ def test_uniform_cr_and_crlf_files_keep_their_ending(ws: Path) -> None:
     assert cr == b"a\rb\rB\rc\r"
     _, crlf = _edit_bytes(ws, b"a\r\nb\r\n", old_text="b", new_text="x\ny")
     assert crlf == b"a\r\nx\r\ny\r\n"
+
+
+def test_unexpected_oserror_while_reading_gets_the_tools_own_message(
+    ws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Other read failures (EIO, ENXIO, ...) used to fall through to the registry's
+    catch-all; ``write_file`` already reported them in the tool's own format."""
+    target = ws / "notes.txt"
+    target.write_text(ORIGINAL)
+
+    def broken(self: Path) -> bytes:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(Path, "read_bytes", broken)
+
+    result = _run(ws, path="notes.txt", old_text="second", new_text="third")
+
+    assert result.startswith("Error: OSError:")
+    assert "Input/output error" in result
+    monkeypatch.undo()
+    assert target.read_text() == ORIGINAL
