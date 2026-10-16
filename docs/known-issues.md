@@ -80,10 +80,16 @@ then `$LIGHT_HARNESS_HOME/.env` (`load_default_dotenv` in `src/light_harness/con
 environment still wins, then `./.env`, then the home file, and `./.env` may set `LIGHT_HARNESS_HOME`;
 README updated), the one test that leaked `AGENT_*` variables into later tests through
 `monkeypatch.delenv` now restores `os.environ` with `mock.patch.dict`, and the CLI has its first tests
-(`tests/test_cli.py`: startup, broken config, home `.env`, missing API key, failed one-shot prompt).
-Everything below still describes
+(`tests/test_cli.py`: startup, broken config, home `.env`, missing API key, failed one-shot prompt),
+and the `generate_diff` note: `edit_file` now builds the diff before the write, so a failure or timeout
+there leaves the file untouched instead of reporting an error for a change already on disk, and
+`generate_diff` (`src/light_harness/tools/edit_diff.py`) aligns only the lines between the unchanged
+head and tail with `autojunk` off, printing a one-line `[diff omitted: ...]` notice when that region
+exceeds 4000 lines (the edit is still applied; checked against `difflib` output on random inputs, where
+hunks can differ from `difflib`'s but always form a valid patch; regression tests in
+`tests/test_edit_file.py`). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 207 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 210 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -116,10 +122,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 - `state.py` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` are not called inside the
   package or by any test. **Kept deliberately** as public convenience API for code embedding `Agent`
   (`Conversation` is exported from `light_harness`); the `Conversation` docstring now says so.
-- `generate_diff` runs `difflib.unified_diff` over up to 10 MB — `SequenceMatcher` is O(n²) worst
-  case and `autojunk` can produce a misleading diff for large files. It now runs in the edit
-  tool's worker thread, so it no longer stalls the event loop, but the write already happened
-  before the diff (`381` then `386`), so a timeout reports failure for a change already on disk.
 
 ## Test-quality issues
 

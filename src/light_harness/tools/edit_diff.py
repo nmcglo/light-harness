@@ -349,13 +349,102 @@ def apply_edits(
     return base_content, new_content
 
 
+# The diff is context for the model, not the edit itself, so its cost is bounded:
+# only the lines between the unchanged head and tail are aligned, and a changed
+# region longer than this is reported instead of diffed (alignment is quadratic in
+# the worst case, and the tool call has a timeout).
+MAX_DIFF_REGION_LINES = 4000
+_DIFF_CONTEXT = 3
+
+
+def _range(start: int, stop: int) -> str:
+    """A unified-diff ``start,length`` range, as :mod:`difflib` writes it."""
+    length = stop - start
+    first = start + 1
+    if length == 1:
+        return str(first)
+    if not length:
+        first -= 1
+    return f"{first},{length}"
+
+
+def _grouped_opcodes(
+    codes: list[tuple[str, int, int, int, int]], n: int
+) -> list[list[tuple[str, int, int, int, int]]]:
+    """Split ``codes`` into hunks with ``n`` lines of context (what
+    ``SequenceMatcher.get_grouped_opcodes`` does, for opcodes built by hand)."""
+    if not codes:
+        return []
+    codes = list(codes)
+    tag, i1, i2, j1, j2 = codes[0]
+    if tag == "equal":
+        codes[0] = (tag, max(i1, i2 - n), i2, max(j1, j2 - n), j2)
+    tag, i1, i2, j1, j2 = codes[-1]
+    if tag == "equal":
+        codes[-1] = (tag, i1, min(i2, i1 + n), j1, min(j2, j1 + n))
+    groups: list[list[tuple[str, int, int, int, int]]] = []
+    group: list[tuple[str, int, int, int, int]] = []
+    for tag, i1, i2, j1, j2 in codes:
+        if tag == "equal" and i2 - i1 > 2 * n:
+            group.append((tag, i1, min(i2, i1 + n), j1, min(j2, j1 + n)))
+            groups.append(group)
+            group = []
+            i1, j1 = max(i1, i2 - n), max(j1, j2 - n)
+        group.append((tag, i1, i2, j1, j2))
+    if group and not (len(group) == 1 and group[0][0] == "equal"):
+        groups.append(group)
+    return groups
+
+
 def generate_diff(old: str, new: str, path: str) -> str:
-    """A unified diff between ``old`` and ``new`` (empty when identical)."""
-    diff = difflib.unified_diff(
-        old.splitlines(keepends=True),
-        new.splitlines(keepends=True),
-        fromfile=f"a/{path}",
-        tofile=f"b/{path}",
-        n=3,
-    )
-    return "".join(diff)
+    """A unified diff between ``old`` and ``new`` (empty when identical).
+
+    Lines the two share at the start and end are not aligned, only what lies
+    between them; when that region is longer than :data:`MAX_DIFF_REGION_LINES`
+    on either side the diff is replaced by a one-line notice."""
+    a = old.splitlines(keepends=True)
+    b = new.splitlines(keepends=True)
+    limit = min(len(a), len(b))
+    head = 0
+    while head < limit and a[head] == b[head]:
+        head += 1
+    tail = 0
+    while tail < limit - head and a[-1 - tail] == b[-1 - tail]:
+        tail += 1
+    a_end, b_end = len(a) - tail, len(b) - tail
+    if head == len(a) == len(b):
+        return ""
+    if max(a_end - head, b_end - head) > MAX_DIFF_REGION_LINES:
+        return (
+            f"[diff omitted: the change spans more than {MAX_DIFF_REGION_LINES} lines "
+            f"of {path}]\n"
+        )
+
+    codes: list[tuple[str, int, int, int, int]] = []
+    if head:
+        codes.append(("equal", 0, head, 0, head))
+    matcher = difflib.SequenceMatcher(None, a[head:a_end], b[head:b_end], autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        codes.append((tag, i1 + head, i2 + head, j1 + head, j2 + head))
+    if tail:
+        codes.append(("equal", a_end, len(a), b_end, len(b)))
+
+    out: list[str] = [f"--- a/{path}\n", f"+++ b/{path}\n"]
+    for group in _grouped_opcodes(codes, _DIFF_CONTEXT):
+        first, last = group[0], group[-1]
+        out.append(f"@@ -{_range(first[1], last[2])} +{_range(first[3], last[4])} @@\n")
+        for op, x1, x2, y1, y2 in group:
+            if op == "equal":
+                out.extend(_diff_line(" ", line) for line in a[x1:x2])
+                continue
+            if op in ("replace", "delete"):
+                out.extend(_diff_line("-", line) for line in a[x1:x2])
+            if op in ("replace", "insert"):
+                out.extend(_diff_line("+", line) for line in b[y1:y2])
+    return "".join(out)
+
+
+def _diff_line(prefix: str, line: str) -> str:
+    if line.endswith("\n"):
+        return prefix + line
+    return f"{prefix}{line}\n\\ No newline at end of file\n"

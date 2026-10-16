@@ -206,3 +206,60 @@ def test_write_file_reports_bytes_not_characters(ws: Path) -> None:
     result = asyncio.run(registry.run("write_file", {"path": "u.txt", "content": "h\u00e9llo"}))
 
     assert result == "Wrote 6 bytes to u.txt."
+
+
+def test_diff_of_an_edit_deep_in_a_file_has_real_line_numbers_and_context(ws: Path) -> None:
+    target = ws / "big.txt"
+    target.write_text("".join(f"line {i}\n" for i in range(1, 101)))
+
+    result = _run(ws, path="big.txt", old_text="line 50\n", new_text="FIFTY\nextra\n")
+
+    assert result.endswith(
+        "--- a/big.txt\n+++ b/big.txt\n@@ -47,7 +47,8 @@\n"
+        " line 47\n line 48\n line 49\n-line 50\n+FIFTY\n+extra\n line 51\n line 52\n line 53\n"
+    )
+
+
+def test_a_change_too_large_to_diff_is_still_applied_and_says_so(ws: Path) -> None:
+    """Aligning two huge, mostly different regions is quadratic; the edit must not
+    pay for it (or time out) just to print context."""
+    lines = 6000
+    target = ws / "big.txt"
+    target.write_text("".join(f"line {i}\n" for i in range(lines)))
+
+    result = _run(ws, path="big.txt", old_text="line 0\nline 1\n", new_text="head\n")
+    assert "Successfully replaced" in result  # small change: diffed normally
+
+    spread = [
+        {"old_text": "line 5\n", "new_text": "FIVE\n"},
+        {"old_text": f"line {lines - 5}\n", "new_text": "LATE\n"},
+    ]
+    result = _run(ws, path="big.txt", edits=spread)
+
+    assert "Successfully replaced 2 block(s)" in result
+    assert "[diff omitted:" in result
+    text = target.read_text()
+    assert "FIVE\n" in text and "LATE\n" in text
+
+
+def test_a_failure_while_building_the_diff_leaves_the_file_untouched(
+    ws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The diff used to be built after the write, so a failure (or a timeout) there
+    reported an error for an edit that was already on disk."""
+    import light_harness.tools.builtin as builtin
+
+    target = ws / "notes.txt"
+    target.write_text(ORIGINAL)
+
+    def boom(*_args: object) -> str:
+        raise RuntimeError("diff failed")
+
+    monkeypatch.setattr(builtin, "generate_diff", boom)
+
+    with pytest.raises(RuntimeError, match="diff failed"):
+        builtin.EditFileTool(builtin.make_workspace(ws))._run_blocking(
+            {"path": "notes.txt", "old_text": "second", "new_text": "third"}
+        )
+
+    assert target.read_text() == ORIGINAL

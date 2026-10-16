@@ -433,10 +433,12 @@ class EditFileTool:
             data = final.encode("utf-8")
             if len(data) > _MAX_FILE_BYTES:
                 return f"Error: edited file would exceed the {_format_size(_MAX_FILE_BYTES)} limit."
+            # Before the write: if this is slow enough to hit the tool timeout, the
+            # file must still be untouched rather than changed under a failure report.
+            diff = generate_diff(base, new, path)
             atomic_write_bytes(real, data)
         except EditError as exc:
             return f"Error: {exc}"
-        diff = generate_diff(base, new, path)
         return f"Successfully replaced {len(edits)} block(s) in {path}.\n{diff}"
 
 
