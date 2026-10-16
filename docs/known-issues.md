@@ -71,7 +71,11 @@ fixed (any `OSError` from the locked read-modify-write is reported as `Error: OS
 test added in `tests/test_edit_file.py`), and the durability note: `atomic_write_bytes`
 (`src/light_harness/tools/workspace.py`) now fsyncs the temp file before the rename and the directory
 after it (best effort for the directory), and `write_file` reports bytes, matching its byte limit
-(tests in `tests/test_workspace.py` and `tests/test_edit_file.py`). Everything below still describes
+(tests in `tests/test_workspace.py` and `tests/test_edit_file.py`), and the `SessionLog` note: `record`
+and `close` now take a lock around write + flush (`src/light_harness/sessions.py`). The premise was
+weaker than listed — every session writes its own uniquely named file, so only threads sharing one
+`SessionLog` could interleave — and CPython's buffered writer did not corrupt lines in a stress run
+without the lock, so no regression test was kept. Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
 pre-fix. Current baseline: `uv run pytest -q` 201 passed, `ruff` and `mypy` clean.
 
@@ -103,7 +107,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 ## Low
 
-- `SessionLog.record` (`sessions.py:40`) has no lock; concurrent appends rely on OS atomicity.
 - `state.py:23-34` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` (`agent.py:34-36`) are
   unreachable API surface kept alive only by tests that do not exist.
 - `cli.py:45` `load_dotenv()` reads `./.env` from the current working directory (as documented), not
