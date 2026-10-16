@@ -152,6 +152,9 @@ _PAGE_CSS = """  :root {
   .tool-all-row { display: flex; align-items: center; gap: 8px; font-size: 13px;
     color: var(--muted); margin-bottom: 8px; }
   .tool-all-row input { width: auto; }
+  .server-check { display: flex; align-items: center; gap: 8px; font-size: 14px;
+    color: var(--fg); margin: 12px 0 8px; }
+  .server-check input { width: auto; }
   .page { display: none; }
   .page.active { display: block; }
   .webhook { margin-bottom: 14px; }
@@ -211,6 +214,21 @@ _PAGE_BODY = """<body>
       <div id="interaction-section"></div>
     </section>
     <section class="section page" id="page-webhooks">
+      <div class="card server-card" style="margin-bottom:18px">
+        <div class="grid three">
+          <label><span>Bind host (--host overrides)</span>
+            <input id="ws-host" placeholder="127.0.0.1"></label>
+          <label><span>Bind port (--port overrides)</span>
+            <input id="ws-port" placeholder="8787"></label>
+          <label><span>Allowed hosts (comma-separated; --allowed-host overrides)</span>
+            <input id="ws-hosts" placeholder="box.local, hooks.example.com"></label>
+        </div>
+        <label class="server-check"><input type="checkbox" id="ws-output-log">
+          Output log: print a line for each webhook call naming its session
+          log file (--output-log overrides)</label>
+        <div style="font-size:13px;color:var(--muted)">Server settings take effect when
+          <code>agent webhooks</code> is (re)started.</div>
+      </div>
       <div class="section-head">
         <h2>Webhooks</h2>
         <button id="add-webhook" class="ghost" type="button">+ Add webhook</button>
@@ -241,6 +259,10 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   var addProviderBtn = document.getElementById("add-provider");
   var addAgentBtn = document.getElementById("add-agent");
   var addPersonaBtn = document.getElementById("add-persona");
+  var wsHost = document.getElementById("ws-host");
+  var wsPort = document.getElementById("ws-port");
+  var wsHosts = document.getElementById("ws-hosts");
+  var wsOutputLog = document.getElementById("ws-output-log");
   var webhookList = document.getElementById("webhook-list");
   var addWebhookBtn = document.getElementById("add-webhook");
 
@@ -466,6 +488,11 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
       ? agents.map(function (a) { return agentCard(a); }).join("")
       : '<p class="empty">No agents defined. Add one to configure the chat loop.</p>';
     renderInteraction();
+    var ws = state.data.webhook_server || {};
+    wsHost.value = ws.host || "";
+    wsPort.value = ws.port == null ? "" : ws.port;
+    wsHosts.value = Array.isArray(ws.allowed_hosts) ? ws.allowed_hosts.join(", ") : "";
+    wsOutputLog.checked = ws.output_log === true;
     var webhooks = state.data.webhooks || [];
     webhookList.innerHTML = webhooks.length
       ? webhooks.map(function (w) { return webhookCard(w); }).join("")
@@ -548,6 +575,16 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     return { chat: { agent: agent } };
   }
 
+  function collectWebhookServer() {
+    return {
+      host: wsHost.value.trim(),
+      port: wsPort.value.trim(),
+      allowed_hosts: wsHosts.value.split(",").map(function (s) { return s.trim(); })
+        .filter(Boolean),
+      output_log: wsOutputLog.checked
+    };
+  }
+
   function collectWebhooks() {
     return Array.from(webhookList.querySelectorAll("[data-webhook]")).map(function (card) {
       return {
@@ -588,7 +625,8 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
         agents: collectAgents(),
         personas: collectPersonas(),
         interaction: collectInteraction(),
-        webhooks: collectWebhooks()
+        webhooks: collectWebhooks(),
+        webhook_server: collectWebhookServer()
       });
       var res = await apiFetch("/api/config", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: body
@@ -660,6 +698,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     }
   });
   webhookList.addEventListener("input", markDirty);
+  [wsHost, wsPort, wsHosts].forEach(function (el) { el.addEventListener("input", markDirty); });
   webhookList.addEventListener("change", markDirty);
   addWebhookBtn.addEventListener("click", function () {
     var empty = webhookList.querySelector(".empty");
@@ -740,6 +779,7 @@ _MANAGED_SECTIONS: tuple[str, ...] = (
     "personas",
     "interaction",
     "webhooks",
+    "webhook_server",
 )
 
 
@@ -936,6 +976,39 @@ def _effective_persona_souls(data: dict[str, Any]) -> None:
             entry[SOUL_FILENAME] = stored
 
 
+def _webhook_server_from_form(raw: Any) -> dict[str, Any]:
+    """Build the file's ``webhook_server:`` mapping; empty fields are omitted."""
+    if not isinstance(raw, dict):
+        raise ValueError("webhook_server: expected an object.")
+    server: dict[str, Any] = {}
+    host = _form_text(raw, "host", "webhook_server")
+    if host:
+        server["host"] = host
+    port = raw.get("port")
+    if isinstance(port, str):
+        port = port.strip()
+    if port not in (None, ""):
+        try:
+            number = int(port)
+        except (TypeError, ValueError):
+            raise ValueError("webhook_server.port: expected an integer.") from None
+        if isinstance(port, bool) or not 1 <= number <= 65535:
+            raise ValueError("webhook_server.port: must be between 1 and 65535.")
+        server["port"] = number
+    hosts = raw.get("allowed_hosts")
+    if hosts is not None:
+        names = _form_names(hosts, "webhook_server.allowed_hosts")
+        if names:
+            server["allowed_hosts"] = names
+    output_log = raw.get("output_log")
+    if output_log is not None:
+        if not isinstance(output_log, bool):
+            raise ValueError("webhook_server.output_log: expected a boolean.")
+        if output_log:
+            server["output_log"] = True
+    return server
+
+
 def _interaction_from_form(raw: Any) -> dict[str, Any]:
     """Build the file's ``interaction:`` mapping from the form's chat selection."""
     if not isinstance(raw, dict):
@@ -986,6 +1059,8 @@ def _build_section(section: str, raw: Any, current: Any) -> Any:
         return _personas_from_form(raw, current)
     if section == "interaction":
         return _interaction_from_form(raw)
+    if section == "webhook_server":
+        return _webhook_server_from_form(raw)
     return _webhooks_from_form(raw)
 
 

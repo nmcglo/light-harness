@@ -475,6 +475,39 @@ def _parse_webhooks(raw: Any, warnings: list[str]) -> list[WebhookConfig]:
     return webhooks
 
 
+def _parse_webhook_server(raw: Any, warnings: list[str]) -> WebhookServerConfig:
+    """Parse the ``webhook_server:`` section, falling back to defaults."""
+    if raw is None:
+        return WebhookServerConfig()
+    if not isinstance(raw, dict):
+        warnings.append("webhook_server: expected a mapping; section ignored")
+        return WebhookServerConfig()
+    normalized = dict(raw)
+    if normalized.get("host") in ("", None):
+        normalized.pop("host", None)
+    if normalized.get("port") in ("", None):
+        normalized.pop("port", None)
+    hosts = normalized.get("allowed_hosts")
+    if isinstance(hosts, str):
+        hosts = [hosts]
+    if hosts is not None:
+        if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
+            warnings.append("webhook_server.allowed_hosts: expected a list of strings; ignored")
+            hosts = None
+        else:
+            hosts = [h.strip() for h in hosts if h.strip()]
+    output_log = normalized.get("output_log")
+    if output_log is not None and not isinstance(output_log, bool):
+        warnings.append("webhook_server.output_log: expected a boolean; key ignored")
+        normalized.pop("output_log", None)
+    normalized["allowed_hosts"] = hosts or []
+    try:
+        return WebhookServerConfig.model_validate(normalized)
+    except ValidationError as exc:
+        warnings.append(f"webhook_server: {_first_error(exc)}; section ignored")
+        return WebhookServerConfig()
+
+
 class Provider(BaseModel):
     """A model endpoint: connection settings plus the models it offers."""
 
@@ -544,6 +577,23 @@ class WebhookConfig(BaseModel):
     system_prompt: str | None = None
 
 
+class WebhookServerConfig(BaseModel):
+    """Where ``agent webhooks`` listens, from the ``webhook_server:`` section.
+
+    ``host``/``port`` are used unless the command line overrides them;
+    ``allowed_hosts`` are extra ``Host`` header names the server answers for;
+    ``output_log`` prints a log line for each accepted webhook call -- naming
+    its run's session log file -- to the server's stdout.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    allowed_hosts: list[str] = Field(default_factory=list)
+    output_log: bool = False
+
+
 class Settings(BaseModel):
     """The effective endpoint the agent loop talks to."""
 
@@ -581,12 +631,14 @@ class Config:
         interaction: Interaction,
         webhooks: list[WebhookConfig],
         warnings: list[str] | None = None,
+        webhook_server: WebhookServerConfig | None = None,
     ) -> None:
         self.providers = providers
         self.agents = agents
         self.personas = personas
         self.interaction = interaction
         self.webhooks = webhooks
+        self.webhook_server = webhook_server or WebhookServerConfig()
         # Human-readable notes about config entries that were ignored on load.
         self.warnings = warnings if warnings is not None else []
 
@@ -606,6 +658,7 @@ class Config:
                 ensure_persona(name, files.get(SOUL_FILENAME, ""))
             else:
                 warnings.append(f"personas.{name}: invalid persona name; entry ignored")
+        webhook_server = _parse_webhook_server(raw.get("webhook_server"), warnings)
         return cls(
             providers=providers,
             agents=agents,
@@ -613,6 +666,7 @@ class Config:
             interaction=interaction,
             webhooks=webhooks,
             warnings=warnings,
+            webhook_server=webhook_server,
         )
 
     def active_agent(self) -> AgentConfig:

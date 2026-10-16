@@ -25,6 +25,8 @@
 # `path`, an `agent` (a name under `agents:`), an optional `secret` that, when
 # set, requires `Authorization: Bearer <secret>`, and an optional `system_prompt`
 # that overrides the agent's default system prompt. `agent webhooks` serves them.
+# `webhook_server:` tunes `agent webhooks`: `host`, `port`, extra `allowed_hosts`,
+# and `output_log` (log each webhook call, naming its run's session log file).
 #
 # There are no per-field env overrides; pull secrets in with $NAME as above.
 # LIGHT_HARNESS_HOME overrides the home dir.
@@ -82,3 +84,12 @@ webhooks:
   - path: /hooks/issues
     agent: terse
     system_prompt: You are a terse issue-triage bot.
+
+webhook_server:
+  # Optional settings for `agent webhooks` (the CLI flags override these).
+  # host: 127.0.0.1
+  # port: 8787
+  # allowed_hosts: [hooks.example]
+  # Print a log line for each accepted webhook call, naming the session log
+  # file of its run, to the server's stdout. --output-log / --no-output-log override.
+  # output_log: true

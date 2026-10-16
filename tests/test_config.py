@@ -566,3 +566,34 @@ def test_default_dotenv_prefers_env_then_cwd_then_home(
         assert os.environ["BOTH"] == "from-cwd"
         assert os.environ["ONLY_HOME"] == "h"  # found through the cwd file's HOME
         assert os.environ["FROM_ENV"] == "real"
+
+
+def test_webhook_server_output_log_parses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(tmp_path, "agents:\n  - name: a\nwebhook_server:\n  output_log: true\n")
+    config = Config.load()
+    assert config.webhook_server.output_log is True
+    assert config.warnings == []
+
+
+def test_webhook_server_output_log_defaults_to_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(tmp_path, "agents:\n  - name: a\n")
+    assert Config.load().webhook_server.output_log is False
+
+
+def test_webhook_server_bad_output_log_is_dropped_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad ``output_log`` drops just that key; the rest of the section stands."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(
+        tmp_path,
+        "agents:\n  - name: a\nwebhook_server:\n  port: 9100\n  output_log: maybe\n",
+    )
+    config = Config.load()
+    assert config.webhook_server.output_log is False
+    assert config.webhook_server.port == 9100
+    assert "webhook_server.output_log: expected a boolean" in "\n".join(config.warnings)

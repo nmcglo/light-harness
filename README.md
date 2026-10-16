@@ -120,6 +120,10 @@ The file is sectioned:
   `path`, an `agent` (a name under `agents:`), an optional `secret` that, when
   set, requires `Authorization: Bearer <secret>`, and an optional `system_prompt`
   that overrides the agent's default system prompt. Served by `agent webhooks`.
+- `webhook_server:` — tunes `agent webhooks`: `host`, `port`, extra
+  `allowed_hosts`, and `output_log` (when true, each accepted webhook call
+  logs itself and names its run's session log file on the server's stdout;
+  `--output-log` / `--no-output-log` override it).
 
 `Config.active_agent()` resolves the agent the loop uses (the one named by
 `interaction.chat.agent`, else the first agent, else a default), and
@@ -199,6 +203,13 @@ no agent is run for it.
 A webhook may carry an optional `system_prompt`, which overrides the agent's
 default (persona-based) system prompt for that webhook's runs.
 
+With `--output-log` (or `output_log: true` under `webhook_server:`), the server
+logs each webhook call whose run started -- time, path, agent, and the session
+log file that will hold that run's chat log (relative to the harness home, so
+`personas/<persona>/sessions/<file>.jsonl`). `--no-output-log` turns it back
+off. Rejected requests (401, 403, 404, 429) and calls whose agent cannot start
+(500) log nothing.
+
 At startup the server prints warnings on stderr naming the webhooks that cannot work as
 configured: the unauthenticated ones, and any webhook whose agent cannot get the tools its
 config implies -- an omitted `tools` list means every built-in, so a webhook whose agent has
@@ -210,6 +221,7 @@ uv run agent webhooks                # http://127.0.0.1:8787/
 uv run agent webhooks --port 9001    # custom port
 uv run agent webhooks --host 0.0.0.0 # expose beyond localhost
 uv run agent webhooks --allowed-host hooks.example # behind a proxy at that name
+uv run agent webhooks --output-log # log each call and its session log file
 ```
 
 ## Extending it

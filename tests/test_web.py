@@ -869,3 +869,36 @@ def test_the_pages_esc_function_neutralizes_markup() -> None:
         "42",
     ]
     assert not any(ch in value for value in escaped for ch in "<>")
+
+
+def test_post_writes_output_log_flag(web_base: str, tmp_path: Path) -> None:
+    payload = {
+        "webhook_server": {"host": "", "port": "", "allowed_hosts": [], "output_log": True}
+    }
+    status, _ = _post(web_base + "/api/config", payload)
+    assert status == 200
+    written = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "output_log: true" in written
+
+    status, _, body = _request(web_base + "/api/config")
+    assert status == 200
+    assert json.loads(body)["data"]["webhook_server"]["output_log"] is True
+
+
+def test_post_omits_a_false_output_log_flag(web_base: str, tmp_path: Path) -> None:
+    payload = {
+        "webhook_server": {"host": "0.0.0.0", "port": "", "allowed_hosts": [], "output_log": False}
+    }
+    status, _ = _post(web_base + "/api/config", payload)
+    assert status == 200
+    written = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "output_log" not in written
+    assert "host: 0.0.0.0" in written
+
+
+def test_post_rejects_a_non_boolean_output_log(web_base: str, tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text("agents:\n  - name: a\n", encoding="utf-8")
+    status, data = _post(web_base + "/api/config", {"webhook_server": {"output_log": "yes"}})
+    assert status == 400
+    assert "output_log: expected a boolean" in data["error"]
+    assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == "agents:\n  - name: a\n"

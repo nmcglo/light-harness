@@ -193,15 +193,37 @@ def _stop_webui(server: ConfigServer | None) -> None:
 
 @app.command()
 def webhooks(
-    host: Annotated[str, typer.Option("--host", help="Bind host.")] = DEFAULT_HOST,
-    port: Annotated[int, typer.Option("--port", help="Bind port.")] = DEFAULT_PORT,
+    host: Annotated[
+        str | None,
+        typer.Option(
+            "--host", help=f"Bind host (default: webhook_server.host or {DEFAULT_HOST})."
+        ),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port", help=f"Bind port (default: webhook_server.port or {DEFAULT_PORT})."
+        ),
+    ] = None,
     allowed_host: Annotated[
         list[str] | None,
         typer.Option(
             "--allowed-host",
             help=(
                 "Host name this server answers for, besides loopback names, IP "
-                "addresses and the bind host. Repeat for every name it is reached by."
+                "addresses and the bind host. Repeat for every name it is reached by. "
+                "Replaces webhook_server.allowed_hosts when given."
+            ),
+        ),
+    ] = None,
+    output_log: Annotated[
+        bool | None,
+        typer.Option(
+            "--output-log/--no-output-log",
+            help=(
+                "Print a log line for each accepted webhook call, naming the "
+                "session log file of its run. Overrides webhook_server.output_log "
+                "when given."
             ),
         ),
     ] = None,
@@ -213,7 +235,17 @@ def webhooks(
     config = _load_config()
     ui = _start_webui(webui, webui_host, webui_port)
     try:
-        serve_webhooks(config, host=host, port=port, allowed_hosts=allowed_host or ())
+        server = config.webhook_server
+        if output_log is not None:
+            # The handler reads the flag off the config, so the CLI override
+            # lands there.
+            server.output_log = output_log
+        serve_webhooks(
+            config,
+            host=host or server.host or DEFAULT_HOST,
+            port=port or server.port or DEFAULT_PORT,
+            allowed_hosts=allowed_host or server.allowed_hosts,
+        )
     finally:
         _stop_webui(ui)
 

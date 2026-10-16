@@ -17,13 +17,21 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from light_harness.agent import Agent
-from light_harness.config import AgentConfig, Config, Interaction, WebhookConfig
+from light_harness.config import (
+    AgentConfig,
+    Config,
+    Interaction,
+    WebhookConfig,
+    persona_sessions_dir,
+)
 from light_harness.llm import ChatMessage, LLMResponse
+from light_harness.sessions import SessionLog
 from light_harness.tools import build_tool_registry
 from light_harness.webhooks import (
     WebhookHandler,
@@ -133,6 +141,49 @@ def _wait_for_prompts(client: CapturingClient, n: int = 1, timeout: float = 5.0)
         if time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for {n} prompt(s): {client.prompts}")
         time.sleep(0.01)
+
+
+def _output_log_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, output_log: bool
+) -> tuple[str, CapturingClient, ThreadingHTTPServer, threading.Thread]:
+    """A started webhook server with ``webhook_server.output_log`` on or off."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(
+        tmp_path,
+        f"""
+        agents:
+          - name: assistant
+            provider: local
+            model: m
+            tools: []
+        webhooks:
+          - path: /hooks/open
+            agent: assistant
+          - path: /hooks/secret
+            agent: assistant
+            secret: topsecret
+        webhook_server:
+          output_log: {str(output_log).lower()}
+        """,
+    )
+    config = Config.load()
+    client = CapturingClient()
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        persona = agent_cfg.name
+        session = SessionLog(
+            persona_sessions_dir(persona),
+            meta={"persona": persona, "agent": persona, "model": "m", "source": "webhook"},
+        )
+        return Agent(
+            client, build_tool_registry(agent_cfg.tools), system_prompt="sp", session=session
+        )
+
+    server = create_webhook_server(config, "127.0.0.1", 0, agent_factory=factory)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return f"http://127.0.0.1:{port}", client, server, thread
 
 
 def test_parse_webhook_body_json() -> None:
@@ -1021,3 +1072,39 @@ def test_a_factory_that_raises_releases_its_slot_and_answers_500(
         server.shutdown()
         server.server_close()
         join_thread(thread)
+
+
+def test_output_log_prints_a_line_per_accepted_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base, client, server, thread = _output_log_server(tmp_path, monkeypatch, output_log=True)
+    try:
+        assert _post(base + "/hooks/open", b'{"a": 1}')[0] == 200
+        _wait_for_prompts(client)
+        assert _post(base + "/hooks/missing", b"{}")[0] == 404
+        assert _post(base + "/hooks/secret", b"{}")[0] == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        join_thread(thread)
+
+    out = capsys.readouterr().out
+    logged = [line for line in out.splitlines() if "webhook POST" in line]
+    assert len(logged) == 1  # rejected calls (404, 401) log nothing
+    assert "webhook POST /hooks/open -> agent 'assistant'" in logged[0]
+    assert "(session: personas/assistant/sessions/" in logged[0]
+    assert logged[0].endswith(".jsonl)")
+
+
+def test_output_log_off_prints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base, client, server, thread = _output_log_server(tmp_path, monkeypatch, output_log=False)
+    try:
+        assert _post(base + "/hooks/open", b"{}")[0] == 200
+        _wait_for_prompts(client)
+    finally:
+        server.shutdown()
+        server.server_close()
+        join_thread(thread)
+    assert "webhook POST" not in capsys.readouterr().out

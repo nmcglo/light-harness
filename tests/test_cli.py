@@ -125,3 +125,35 @@ def test_a_failed_one_shot_prompt_reports_an_error_and_exits_1(home: Path) -> No
 
     assert result.exit_code == 1
     assert "endpoint exploded" in result.output
+
+
+def _capture_webhook_output_log(home: Path, seen: list[bool]):
+    """Patch ``serve_webhooks`` so the command returns and records the flag."""
+
+    def fake_serve(config: cli.Config, **kwargs: object) -> None:
+        seen.append(config.webhook_server.output_log)
+
+    return mock.patch.object(cli, "serve_webhooks", fake_serve)
+
+
+def test_webhooks_output_log_flag_overrides_the_config(home: Path) -> None:
+    (home / "config.yaml").write_text(
+        CONFIG + "webhook_server:\n  output_log: false\n", encoding="utf-8"
+    )
+    seen: list[bool] = []
+    with _capture_webhook_output_log(home, seen):
+        for flags in ([], ["--output-log"], ["--no-output-log"]):
+            result = runner.invoke(cli.app, ["webhooks", *flags])
+            assert result.exit_code == 0, result.output
+    assert seen == [False, True, False]
+
+
+def test_webhooks_no_output_log_flag_overrides_a_true_config(home: Path) -> None:
+    (home / "config.yaml").write_text(
+        CONFIG + "webhook_server:\n  output_log: true\n", encoding="utf-8"
+    )
+    seen: list[bool] = []
+    with _capture_webhook_output_log(home, seen):
+        result = runner.invoke(cli.app, ["webhooks", "--no-output-log"])
+        assert result.exit_code == 0, result.output
+    assert seen == [False]

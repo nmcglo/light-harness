@@ -7,6 +7,10 @@ acknowledges the POST immediately (200 ``OK``); the agent runs in a background
 thread and its answer is not returned to the caller. A webhook can optionally
 require a bearer secret in the ``Authorization`` header.
 
+With ``webhook_server.output_log`` (or ``agent webhooks --output-log``), each
+accepted call logs itself -- time, path, agent -- and names the session log
+file that will hold its run's chat log.
+
 Every request must also carry a ``Host`` header that names this server -- a
 loopback name, an IP address, the bind host, or one passed as ``allowed_hosts``
 (see :func:`light_harness.htputil.host_is_allowed`). A webhook that needs no
@@ -21,7 +25,9 @@ import json
 import sys
 import threading
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -29,7 +35,14 @@ from rich.console import Console
 from rich.table import Table
 
 from .agent import Agent
-from .config import AgentConfig, Config, WebhookConfig, ensure_persona, persona_sessions_dir
+from .config import (
+    AgentConfig,
+    Config,
+    WebhookConfig,
+    config_home,
+    ensure_persona,
+    persona_sessions_dir,
+)
 from .httputil import (
     BodyError,
     declared_body,
@@ -91,6 +104,16 @@ async def _release_agent(agent: Agent) -> None:
     finally:
         if agent.session is not None:
             agent.session.close()
+
+
+def _session_log_name(path: Path) -> str:
+    """A session log file's path relative to the harness home (where session
+    logs live); the absolute path if it is not under home."""
+    try:
+        return str(path.relative_to(config_home()))
+    except ValueError:
+        return str(path)
+
 
 
 def default_agent_factory(
@@ -177,6 +200,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         agent: Agent | None = None
         try:
             agent = self._make_agent(webhook)
+            if self.config.webhook_server.output_log:
+                stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                suffix = ""
+                if agent.session is not None:
+                    suffix = f" (session: {_session_log_name(agent.session.path)})"
+                print(f"{stamp} webhook {self.command} {path} -> agent '{webhook.agent}'{suffix}")
             self._spawn(agent, body)
         except Exception as exc:  # noqa: BLE001 - report the failure to the caller
             self.run_slots.release()
@@ -253,7 +282,10 @@ def create_webhook_server(
     At most ``max_concurrent_runs`` agent runs are in flight; further POSTs get 429.
     A request whose ``Host`` header does not name this server gets 403 before any
     agent is built; ``allowed_hosts`` are the names the server is really reached by
-    (a public hostname, the name a reverse proxy forwards)."""
+    (a public hostname, the name a reverse proxy forwards).
+
+    When ``config.webhook_server.output_log`` is set, each accepted call logs
+    itself to stdout, naming the session log file of its run."""
     factory: Callable[[Config, AgentConfig, WebhookConfig], Agent] = (
         default_agent_factory if agent_factory is None else agent_factory
     )
