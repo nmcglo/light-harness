@@ -113,6 +113,45 @@ def _parse_tool_arguments(raw: Any) -> tuple[dict[str, Any], str | None]:
     return raw, None
 
 
+class LLMError(Exception):
+    """The endpoint answered, but not with a usable chat completion."""
+
+
+def _first_message(response: httpx.Response) -> dict[str, Any]:
+    """Return ``choices[0].message`` from a 200 response, or raise :class:`LLMError`
+    saying what was wrong with it (empty ``choices`` is common when a guardrail
+    blocks a request)."""
+    try:
+        data = response.json()
+    except ValueError:
+        raise LLMError("the response body is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise LLMError(f"the response is a JSON {type(data).__name__}, not an object")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        detail = data.get("error")
+        suffix = f": {detail}" if detail else ""
+        raise LLMError(f"the response has no choices{suffix}")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        raise LLMError("the first choice has no message object")
+    return message
+
+
+def _tool_call_fields(raw: Any) -> tuple[str, str, Any]:
+    """Return ``(id, name, arguments)`` of a wire tool call, or raise
+    :class:`LLMError`. Without an id or name the call cannot be answered, so it
+    cannot be passed on to the model as a tool error either."""
+    function = raw.get("function") if isinstance(raw, dict) else None
+    if not isinstance(function, dict):
+        raise LLMError("the response has a malformed tool call (no function object)")
+    call_id = raw.get("id")
+    name = function.get("name")
+    if not isinstance(call_id, str) or not isinstance(name, str):
+        raise LLMError("the response has a tool call without a string id and function name")
+    return call_id, name, function.get("arguments")
+
+
 class OpenAICompatibleClient:
     """Default client: posts to ``{base_url}/chat/completions``."""
 
@@ -166,19 +205,13 @@ class OpenAICompatibleClient:
             payload["tool_choice"] = "auto"
 
         response = await self._post_with_retry(payload)
-        choice = response.json()["choices"][0]["message"]
+        choice = _first_message(response)
 
         tool_calls: list[ToolCall] = []
         for raw in choice.get("tool_calls") or []:
-            args, error = _parse_tool_arguments(raw["function"]["arguments"])
-            tool_calls.append(
-                ToolCall(
-                    id=raw["id"],
-                    name=raw["function"]["name"],
-                    arguments=args,
-                    error=error,
-                )
-            )
+            call_id, name, arguments = _tool_call_fields(raw)
+            args, error = _parse_tool_arguments(arguments)
+            tool_calls.append(ToolCall(id=call_id, name=name, arguments=args, error=error))
 
         return LLMResponse(
             message=ChatMessage(

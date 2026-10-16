@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
+import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -195,7 +196,17 @@ async def _run_agent(agent: Agent, prompt: str) -> None:
 
 
 async def _run_turn(agent: Agent, prompt: str) -> None:
-    console.print(await agent.run(prompt))
+    try:
+        console.print(await agent.run(prompt))
+    except Exception as exc:  # noqa: BLE001 - report any failed run, not a traceback
+        err_console.print(f"[red]Error:[/red] {_describe_failure(exc)}")
+        raise typer.Exit(code=1) from None
+
+
+def _describe_failure(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"the model endpoint returned HTTP {exc.response.status_code}"
+    return escape(f"{type(exc).__name__}: {exc}")
 
 
 async def _run_repl(agent: Agent) -> None:
@@ -211,7 +222,10 @@ async def _run_repl(agent: Agent) -> None:
             continue
         if line.lower() in {"exit", "quit"}:
             break
-        console.print(await agent.run(line))
+        try:
+            console.print(await agent.run(line))
+        except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session
+            err_console.print(f"[red]Error:[/red] {_describe_failure(exc)}")
     console.print("bye")
 
 

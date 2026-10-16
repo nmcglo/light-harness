@@ -3,7 +3,7 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **C2**, **D1**, **S1**, **S2**,
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **C2**, **D1**, **L1**, **S1**, **S2**,
 **S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
@@ -35,9 +35,15 @@ it instead of dropping it (regression test in `tests/test_edit_file.py`), and **
 `src/light_harness/tools/workspace.py`) across the whole read → match → write, so concurrent runs —
 threads or separate processes — no longer overwrite each other's edits (regression test in
 `tests/test_edit_file.py`; advisory, so it only orders the harness's own writers, and edits to
-different files in one directory take turns). Everything below still describes
+different files in one directory take turns), and **L1**: `OpenAICompatibleClient.chat` validates the
+response shape and raises `LLMError` (`src/light_harness/llm.py`) naming the problem — empty `choices`
+(with the endpoint's `error` text if any), a non-JSON 200 body, a missing `message`, a tool call without
+an id or function name — instead of `IndexError`/`KeyError`/`ValueError`; `agent chat` reports a failed
+turn and keeps the REPL running, and a one-shot prompt prints the error and exits 1 (`src/light_harness/cli.py`);
+the connection-error retry and exponential backoff now have tests (`tests/test_agent.py`). Transport and HTTP
+status errors still surface as `httpx` exceptions. Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 187 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 190 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -63,24 +69,12 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| L1 | `llm.py` | Unguarded response shape (`choices[0]`, malformed tool_call) | medium | inference |
 | E2 | `edit_diff.py` | No-op guard can never fire in fuzzy mode | medium | inference |
 | S4 | `tools/workspace.py` | Deny check is lexical (case-insensitive FS) and blind to hardlinks | low | inference |
 | W2 | `web.py` | Unguarded `read_text`; inconsistent `ConfigError` handling | low | inference |
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Medium
-
-### L1 — LLM response shape is unguarded
-
-`llm.py:169` `response.json()["choices"][0]["message"]` → `IndexError` when `choices` is empty (common with
-guardrails); a non-JSON 200 body → `ValueError`; `170-176` `raw["id"]`, `raw["function"]["arguments"]` →
-`KeyError` on a malformed tool call. `Agent.run` (`agent.py:38-72`) has no `try`, the webhook worker prints
-to stderr after already acking 200 (`webhooks.py:171`), and `cli._run_repl` (`cli.py:178-186`) catches
-only `EOFError/KeyboardInterrupt` — one transient failure ends the whole REPL. The transport-error retry
-branch and the exponential backoff (`llm.py:145-152`) are untested: the existing test uses canned
-`MockTransport` responses and `retry_delay=0`, so a change from exponential to constant delay, or a dropped
-`if last: raise`, would pass. Connection failures are the most common real failure mode.
 
 ### E2 — The "no changes made" guard can never fire in fuzzy mode
 

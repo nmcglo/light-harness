@@ -201,3 +201,116 @@ def test_llm_client_retries_transient_errors_but_not_client_errors() -> None:
         assert calls["n"] == 3  # gives up after the attempt budget
     finally:
         asyncio.run(http.aclose())
+
+
+def _chat_once(handler):
+    client, http = _mock_client(handler)
+    try:
+        return asyncio.run(client.chat([ChatMessage(role="user", content="hi")]))
+    finally:
+        asyncio.run(http.aclose())
+
+
+def test_unusable_responses_raise_llm_error_naming_the_problem() -> None:
+    import httpx
+    import pytest
+
+    from light_harness.llm import LLMError
+
+    bad_call = {"type": "function", "function": {"name": "add", "arguments": "{}"}}  # no id
+    cases = {
+        "no choices": (httpx.Response(200, json={"choices": []}), "no choices"),
+        "guardrail error": (
+            httpx.Response(200, json={"error": "blocked by policy"}),
+            "blocked by policy",
+        ),
+        "not json": (httpx.Response(200, content=b"<html>gateway</html>"), "not valid JSON"),
+        "no message": (httpx.Response(200, json={"choices": [{}]}), "no message"),
+        "tool call without id": (
+            httpx.Response(200, json=_completion({"content": "", "tool_calls": [bad_call]})),
+            "without a string id",
+        ),
+        "tool call not an object": (
+            httpx.Response(200, json=_completion({"content": "", "tool_calls": ["x"]})),
+            "malformed tool call",
+        ),
+    }
+    for name, (response, expected) in cases.items():
+        with pytest.raises(LLMError, match=expected):
+            _chat_once(lambda request, r=response: r)
+        assert name  # keeps the failing case visible in the traceback
+
+
+def test_transport_errors_are_retried_with_exponential_backoff(monkeypatch) -> None:
+    import httpx
+    import pytest
+
+    from light_harness.config import Settings
+    from light_harness.llm import OpenAICompatibleClient
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("light_harness.llm.asyncio.sleep", fake_sleep)
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise httpx.ConnectError("down")
+        return httpx.Response(200, json=_completion({"content": "ok"}))
+
+    def build(h) -> tuple[OpenAICompatibleClient, httpx.AsyncClient]:
+        http = httpx.AsyncClient(base_url="http://llm.test/v1", transport=httpx.MockTransport(h))
+        return OpenAICompatibleClient(Settings(), client=http, retry_delay=1.0), http
+
+    client, http = build(handler)
+    try:
+        response = asyncio.run(client.chat([ChatMessage(role="user", content="hi")]))
+    finally:
+        asyncio.run(http.aclose())
+    assert response.message.content == "ok"
+    assert sleeps == [1.0, 2.0]
+
+    def always_down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down")
+
+    sleeps.clear()
+    client, http = build(always_down)
+    try:
+        with pytest.raises(httpx.ConnectError):
+            asyncio.run(client.chat([ChatMessage(role="user", content="hi")]))
+    finally:
+        asyncio.run(http.aclose())
+    assert sleeps == [1.0, 2.0]  # no sleep after the final attempt
+
+
+def test_repl_survives_a_failed_turn(monkeypatch) -> None:
+    from light_harness import cli
+    from light_harness.llm import LLMError
+
+    class FlakyAgent:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def run(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if prompt == "boom":
+                raise LLMError("the response has no choices")
+            return f"answer to {prompt}"
+
+    lines = iter(["boom", "again", "exit"])
+    monkeypatch.setattr(cli.console, "input", lambda *_a, **_k: next(lines))
+    printed: list[str] = []
+    monkeypatch.setattr(cli.console, "print", lambda *a, **_k: printed.append(str(a[0])))
+    errors: list[str] = []
+    monkeypatch.setattr(cli.err_console, "print", lambda *a, **_k: errors.append(str(a[0])))
+    agent = FlakyAgent()
+
+    asyncio.run(cli._run_repl(agent))  # type: ignore[arg-type]
+
+    assert agent.prompts == ["boom", "again"]
+    assert "answer to again" in printed
+    assert any("no choices" in e for e in errors)
