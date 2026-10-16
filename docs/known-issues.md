@@ -87,9 +87,24 @@ there leaves the file untouched instead of reporting an error for a change alrea
 head and tail with `autojunk` off, printing a one-line `[diff omitted: ...]` notice when that region
 exceeds 4000 lines (the edit is still applied; checked against `difflib` output on random inputs, where
 hunks can differ from `difflib`'s but always form a valid patch; regression tests in
-`tests/test_edit_file.py`). Everything below still describes
+`tests/test_edit_file.py`), and **X1** with the test-quality issues: the config tautology now asserts a
+literal tool set; the two webhook prompt tests that echoed the fixture's own `"sp"` were replaced by tests
+of the real `default_agent_factory` (persona prompt vs webhook override, persona and session-log creation,
+workspace wiring into the file tools, session closed when the agent cannot be built); body limits are
+checked on what the server consumed (`tests/test_httputil.py`: an oversized `Content-Length` or chunk
+is refused with zero body bytes read); the atomic-write test no longer asserts a directory listing but
+fails the rename (OSError, Ctrl-C: old file and no temp file remain) and races readers against a writer
+(a plain truncate-and-write is caught by it); `tests/conftest.py` clears the proxy variables and sets
+`NO_PROXY` for loopback, server threads must actually stop (`tests/_helpers.py`) and the blocking-client
+gate timeout is asserted; the `recv` assumption is gone (responses are read from a buffered stream).
+New coverage: `edit_file` duplicates, overlap, matching against the original, fuzzy hits, BOM/CRLF,
+exact no-op, empty file and the size limit; symlink-loop and NUL paths; array/object and unknown
+arguments and a raising tool (`tests/test_tools.py`); config-endpoint body errors (400/413, connection
+closed, file untouched); `max_concurrent_runs > 1` and slot release after a failed run or factory;
+and `esc()`, which needs `node` and is skipped where it is missing (its expectations were checked
+once against a JS engine by hand). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 210 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 246 passed, 1 skipped, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -111,41 +126,11 @@ Severity: **high** = silent data loss or wrong result on a normal path; **medium
 failure under realistic conditions; **low** = polish or platform-conditional.
 Verification: *verified* = reproduced against the live code; *inference* = read from the code.
 
-## Index
-
-| ID | Area | Issue | Severity | Verified |
-| --- | --- | --- | --- | --- |
-| X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
-
 ## Low
 
 - `state.py` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` are not called inside the
   package or by any test. **Kept deliberately** as public convenience API for code embedding `Agent`
   (`Conversation` is exported from `light_harness`); the `Conversation` docstring now says so.
-
-## Test-quality issues
-
-- `test_config.py:147` is tautological: `assert with_ws == {t.name for t in builtin_tools(tmp_path)}` compares the
-  implementation against itself.
-- `test_webhooks.py:357-363` is a mock-echo: it asserts the fixture's own literal `"sp"` (`test_webhooks.py:90`),
-  not `config.system_prompt_for`. `default_agent_factory` (`webhooks.py:79-108`) — workspace wiring, persona
-  resolution, `ensure_persona`, session creation, the `except BaseException: session.close()` leak guard — has
-  zero coverage because every server test injects its own factory.
-- `test_webhooks.py:375` `test_webhook_rejects_oversized_body_without_reading_it` proves the agent did not run,
-  not that bytes were not read. `test_workspace.py:100` `test_write_is_atomic_and_keeps_mode` never interrupts a
-  write or races a reader; it asserts an incidental directory listing.
-- Flaky/environment-sensitive: `urlopen` in `test_web.py:41,62` and `test_webhooks.py:113,118` honours `HTTP_PROXY`
-  unless `no_proxy` covers `127.0.0.1` (other tests in the same file use raw sockets — inconsistent protection);
-  `test_webhooks.py:370-372` assumes the whole status line lands in one `recv`; `join(timeout=5)` and
-  `gate.wait(5)` timeouts are never asserted, so a wedged handler thread passes.
-- Untested paths worth covering: `edit_file` uniqueness, overlap, fuzzy, CRLF/BOM/mixed endings, no-op, empty file;
-  the `POST` body-error 400/413
-  paths for the endpoint that writes the config file; `esc()` (the only thing preventing stored-XSS token theft,
-  since config values are inserted via `innerHTML`); the wildcard-bind Host skip (`web.py:745-746`);
-  symlink-loop and NUL paths in `Workspace.resolve`; `atomic_write_bytes`' failure path; `array`/`object`
-  argument types (skipped by design, so `edit_file`'s `items.required` is never enforced) and unknown arguments;
-  a tool raising an exception (`tools/__init__.py:91`); `max_concurrent_runs > 1` and slot release on a failing run;
-  the `edit_file` result size limit (`builtin.py:379`).
 
 ## What is solid
 

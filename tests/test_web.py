@@ -21,6 +21,8 @@ import yaml
 from light_harness.config import Config
 from light_harness.web import create_server
 
+from ._helpers import join_thread
+
 
 @pytest.fixture()
 def web_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
@@ -34,7 +36,7 @@ def web_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     yield f"http://127.0.0.1:{port}"
     server.shutdown()
     server.server_close()
-    thread.join(timeout=5)
+    join_thread(thread)
 
 
 def _token(url: str) -> str:
@@ -180,7 +182,7 @@ def test_cors_origin_configurable_and_disableable(
         finally:
             server.shutdown()
             server.server_close()
-            thread.join(timeout=5)
+            join_thread(thread)
 
 
 def test_rejects_unexpected_host_header(web_base: str) -> None:
@@ -233,7 +235,7 @@ def test_cors_origin_must_be_a_bare_origin(
         finally:
             server.shutdown()
             server.server_close()
-            thread.join(timeout=5)
+            join_thread(thread)
 
 
 def test_api_responses_are_not_cacheable(web_base: str) -> None:
@@ -269,7 +271,7 @@ def test_wildcard_bind_still_checks_host(tmp_path: Path, monkeypatch: pytest.Mon
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        join_thread(thread)
 
 
 def test_allowed_hosts_name_the_names_the_server_is_reached_by(
@@ -302,7 +304,7 @@ def test_allowed_hosts_name_the_names_the_server_is_reached_by(
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        join_thread(thread)
 
 
 def test_serves_html_page(web_base: str) -> None:
@@ -764,3 +766,106 @@ def test_binary_config_file_gets_json_errors_on_get_and_post(
     assert status == 400
     assert data["ok"] is False
     assert cfg.read_bytes() == blob
+
+
+def _raw_post(web_base: str, head_lines: list[str], tail: bytes = b"") -> tuple[int, dict, bytes]:
+    """POST /api/config over a raw socket with exactly the given header lines (no
+    automatic Content-Length), returning (status, lowercased headers, body)."""
+    import socket
+
+    host, port = web_base.removeprefix("http://").split(":")
+    lines = [
+        "POST /api/config HTTP/1.1",
+        f"Host: {host}:{port}",
+        f"X-Agent-Token: {_token(web_base)}",
+        "Content-Type: application/json",
+        *head_lines,
+    ]
+    with socket.create_connection((host, int(port)), timeout=5) as s:
+        s.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + tail)
+        stream = s.makefile("rb")
+        status = int(stream.readline().split()[1])
+        headers: dict[str, str] = {}
+        while (line := stream.readline()) not in (b"\r\n", b""):
+            name, _, value = line.decode("iso-8859-1").partition(":")
+            headers[name.lower()] = value.strip()
+        body = stream.read(int(headers.get("content-length", "0")))
+    return status, headers, body
+
+
+_SEED = "agents:\n  - name: keep\n    model: m\n"
+
+
+@pytest.mark.parametrize(
+    ("head_lines", "tail", "status", "needle"),
+    [
+        (["Content-Length: 10485760"], b"", 413, "exceeds"),
+        (["Content-Length: abc"], b"", 400, "Content-Length"),
+        (["Content-Length: -5"], b"", 400, "Content-Length"),
+        (["Transfer-Encoding: gzip"], b"", 400, "Transfer-Encoding"),
+        (["Transfer-Encoding: chunked"], b"zz\r\n", 400, "chunk size"),
+        (["Transfer-Encoding: chunked"], b"200001\r\n", 413, "exceeds"),
+    ],
+)
+def test_post_body_errors_are_json_closed_and_leave_the_config_alone(
+    web_base: str,
+    tmp_path: Path,
+    head_lines: list[str],
+    tail: bytes,
+    status: int,
+    needle: str,
+) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_SEED, encoding="utf-8")
+
+    got_status, headers, body = _raw_post(web_base, head_lines, tail)
+
+    assert got_status == status
+    assert headers["connection"] == "close"  # the unread bytes must not become a request
+    payload = json.loads(body)
+    assert payload["ok"] is False
+    assert needle in payload["error"]
+    assert cfg.read_text(encoding="utf-8") == _SEED
+
+
+def _js_runtime() -> str | None:
+    import shutil
+
+    return shutil.which("node")
+
+
+@pytest.mark.skipif(_js_runtime() is None, reason="needs node to run the page's JavaScript")
+def test_the_pages_esc_function_neutralizes_markup() -> None:
+    """Config values reach the DOM through ``innerHTML``; ``esc`` is what stops a
+    stored value such as a persona prompt from running script with the API token."""
+    import subprocess
+
+    from light_harness.web import _PAGE_JS
+
+    start = _PAGE_JS.index("function esc(")
+    end = _PAGE_JS.index("function setStatus(")
+    script = (
+        _PAGE_JS[start:end]
+        + "\nconst inputs = ['<img src=x onerror=alert(1)>', '\"><script>x</script>',"
+        " \"it's & <b>\", null, 42];\n"
+        "console.log(JSON.stringify(inputs.map(esc)));\n"
+    )
+    runtime = _js_runtime()
+    assert runtime is not None
+    run = subprocess.run(
+        [runtime, "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+
+    escaped = json.loads(run.stdout)
+    assert escaped == [
+        "&lt;img src=x onerror=alert(1)&gt;",
+        "&quot;&gt;&lt;script&gt;x&lt;/script&gt;",
+        "it&#39;s &amp; &lt;b&gt;",
+        "",
+        "42",
+    ]
+    assert not any(ch in value for value in escaped for ch in "<>")

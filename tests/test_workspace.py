@@ -99,7 +99,7 @@ def test_harness_home_is_off_limits_even_via_symlink(dirs: tuple[Path, Path, Pat
     assert "not accessible" in _run(nested, "read_file", path="x.txt")
 
 
-def test_write_is_atomic_and_keeps_mode(dirs: tuple[Path, Path, Path]) -> None:
+def test_write_keeps_the_files_mode(dirs: tuple[Path, Path, Path]) -> None:
     ws, _, _ = dirs
     script = ws / "run.sh"
     script.write_text("old\n")
@@ -107,7 +107,64 @@ def test_write_is_atomic_and_keeps_mode(dirs: tuple[Path, Path, Path]) -> None:
     _run(ws, "write_file", path="run.sh", content="new\n")
     assert script.read_text() == "new\n"
     assert stat.S_IMODE(script.stat().st_mode) == 0o750
-    assert [p.name for p in ws.iterdir()] == ["run.sh"]  # no stray temp files
+
+
+@pytest.mark.parametrize("failure", [OSError(28, "No space left on device"), KeyboardInterrupt()])
+def test_a_write_that_fails_midway_leaves_the_old_file_and_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    """The new content is fully written to a temp file first; if the rename never
+    happens (disk full, Ctrl-C) the original must be intact and nothing left behind."""
+    from light_harness.tools.workspace import atomic_write_bytes
+
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"original")
+
+    def fail(src: object, dst: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(os, "replace", fail)
+
+    with pytest.raises(type(failure)):
+        atomic_write_bytes(target, b"replacement that never lands")
+
+    monkeypatch.undo()
+    assert target.read_bytes() == b"original"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+def test_a_concurrent_reader_only_ever_sees_a_whole_version(tmp_path: Path) -> None:
+    """Readers racing the writer must get one complete version or the other, never an
+    empty or half-written file (which a plain truncate-and-write would show)."""
+    import threading
+
+    from light_harness.tools.workspace import atomic_write_bytes
+
+    target = tmp_path / "f.txt"
+    versions = (b"A" * 400_000, b"B" * 400_000)
+    target.write_bytes(versions[0])
+    stop = threading.Event()
+    seen_bad: list[int] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            data = target.read_bytes()
+            if data not in versions:
+                seen_bad.append(len(data))
+
+    readers = [threading.Thread(target=reader) for _ in range(3)]
+    for t in readers:
+        t.start()
+    try:
+        for i in range(150):
+            atomic_write_bytes(target, versions[i % 2])
+    finally:
+        stop.set()
+        for t in readers:
+            t.join(timeout=5)
+            assert not t.is_alive()
+
+    assert seen_bad == []
 
 
 @pytest.mark.parametrize("umask", [0o077, 0o027, 0o022])
@@ -236,3 +293,21 @@ def test_atomic_write_syncs_data_before_rename_and_directory_after(
 
     assert events == ["fsync", "replace", "fsync"]
     assert (tmp_path / "f.txt").read_bytes() == b"data"
+
+
+def test_a_symlink_loop_is_refused_instead_of_crashing(dirs: tuple[Path, Path, Path]) -> None:
+    ws, _, _ = dirs
+    (ws / "a").symlink_to("b")
+    (ws / "b").symlink_to("a")
+
+    with pytest.raises(WorkspaceError, match="cannot resolve path"):
+        Workspace(ws).resolve("a")
+    assert _run(ws, "read_file", path="a").startswith("Error:")
+
+
+@pytest.mark.parametrize("raw", ["", "a\x00b", "\x00"])
+def test_empty_and_nul_paths_are_invalid(dirs: tuple[Path, Path, Path], raw: str) -> None:
+    ws, _, _ = dirs
+
+    with pytest.raises(WorkspaceError, match="invalid path"):
+        Workspace(ws).resolve(raw)

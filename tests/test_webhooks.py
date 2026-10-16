@@ -34,6 +34,8 @@ from light_harness.webhooks import (
     unauthenticated_warning,
 )
 
+from ._helpers import join_thread
+
 
 def _write_cfg(home: Path, text: str) -> None:
     home.mkdir(parents=True, exist_ok=True)
@@ -102,7 +104,7 @@ def webhook_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield f"http://127.0.0.1:{port}", client
     server.shutdown()
     server.server_close()
-    thread.join(timeout=5)
+    join_thread(thread)
 
 
 def _post(url: str, data: bytes, headers: dict[str, str] | None = None) -> tuple[int, dict]:
@@ -414,7 +416,7 @@ def test_webhook_non_ascii_secret_authenticates_over_the_wire(
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        join_thread(thread)
 
 
 def test_webhook_unknown_path_is_404(webhook_server) -> None:
@@ -451,7 +453,7 @@ def test_webhook_unknown_agent_is_500(tmp_path: Path, monkeypatch: pytest.Monkey
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        join_thread(thread)
 
 
 def test_webhook_get_is_405(webhook_server) -> None:
@@ -460,21 +462,129 @@ def test_webhook_get_is_405(webhook_server) -> None:
     assert status == 405
 
 
-def test_webhook_custom_system_prompt_reaches_agent(webhook_server) -> None:
-    base, client = webhook_server
-    status, _ = _post(base + "/hooks/custom", b'{"a": 1}')
-    assert status == 200
-    _wait_for_prompts(client)
-    assert client.system_prompts == ["You are a deploy bot."]
-    assert len(client.prompts) == 1
+def _real_factory_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path | None):
+    """A real ``Config`` (personas, workspace, provider) for ``default_agent_factory``."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FACTORY_KEY", "sk-factory")
+    _write_cfg(
+        tmp_path / "home",
+        "providers:\n"
+        "  local:\n"
+        "    base_url: http://llm.test/v1\n"
+        "    api_key: $FACTORY_KEY\n"
+        "    models: [m]\n"
+        "personas:\n"
+        "  p1:\n"
+        "    SOUL.md: You are persona one.\n"
+        "agents:\n"
+        "  - name: assistant\n"
+        "    provider: local\n"
+        "    model: m\n"
+        "    persona: p1\n"
+        "    tools: [echo, read_file]\n"
+        + (f"    workspace: {workspace}\n" if workspace else "")
+        + "webhooks:\n"
+        "  - path: /hooks/a\n"
+        "    agent: assistant\n"
+        "  - path: /hooks/b\n"
+        "    agent: assistant\n"
+        "    system_prompt: You are a deploy bot.\n",
+    )
+    config = Config.load()
+    agent_cfg = config.get_agent("assistant")
+    assert agent_cfg is not None
+    return config, agent_cfg, {w.path: w for w in config.webhooks}
 
 
-def test_webhook_default_system_prompt_when_unset(webhook_server) -> None:
-    base, client = webhook_server
-    status, _ = _post(base + "/hooks/open", b'{"a": 1}')
-    assert status == 200
-    _wait_for_prompts(client)
-    assert client.system_prompts == ["sp"]
+def test_default_factory_uses_the_personas_prompt_unless_the_webhook_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from light_harness.webhooks import _release_agent, default_agent_factory
+
+    config, agent_cfg, hooks = _real_factory_setup(tmp_path, monkeypatch, None)
+
+    plain = default_agent_factory(config, agent_cfg, hooks["/hooks/a"])
+    overridden = default_agent_factory(config, agent_cfg, hooks["/hooks/b"])
+    try:
+        assert plain.system_prompt == config.system_prompt_for(agent_cfg)
+        assert plain.system_prompt == "You are persona one."
+        assert overridden.system_prompt == "You are a deploy bot."
+    finally:
+        asyncio.run(_release_agent(plain))
+        asyncio.run(_release_agent(overridden))
+
+
+def test_default_factory_creates_the_persona_and_a_webhook_session_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from light_harness.webhooks import _release_agent, default_agent_factory
+
+    config, agent_cfg, hooks = _real_factory_setup(tmp_path, monkeypatch, None)
+
+    agent = default_agent_factory(config, agent_cfg, hooks["/hooks/a"])
+    try:
+        assert agent.session is not None
+        sessions = tmp_path / "home" / "personas" / "p1" / "sessions"
+        assert agent.session.path.parent == sessions
+        header = json.loads(agent.session.path.read_text(encoding="utf-8").splitlines()[0])
+        assert header == {
+            "type": "session",
+            "persona": "p1",
+            "agent": "assistant",
+            "model": "m",
+            "source": "webhook",
+        }
+        assert (tmp_path / "home" / "personas" / "p1" / "SOUL.md").is_file()
+    finally:
+        asyncio.run(_release_agent(agent))
+
+
+def test_default_factory_wires_the_workspace_into_the_file_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from light_harness.webhooks import _release_agent, default_agent_factory
+
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "hello.txt").write_text("from the workspace")
+    config, agent_cfg, hooks = _real_factory_setup(tmp_path, monkeypatch, workspace)
+
+    agent = default_agent_factory(config, agent_cfg, hooks["/hooks/a"])
+    try:
+        assert agent.tools.names() == ["echo", "read_file"]
+        assert asyncio.run(agent.tools.run("read_file", {"path": "hello.txt"})) == (
+            "from the workspace"
+        )
+        assert asyncio.run(agent.tools.run("read_file", {"path": "../../etc/passwd"})).startswith(
+            "Error:"
+        )
+    finally:
+        asyncio.run(_release_agent(agent))
+
+
+def test_default_factory_closes_the_session_when_the_agent_cannot_be_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import light_harness.webhooks as webhooks_module
+
+    config, agent_cfg, hooks = _real_factory_setup(tmp_path, monkeypatch, None)
+    sessions: list = []
+    real_session = webhooks_module.SessionLog
+
+    def recording_session(*args, **kwargs):
+        sessions.append(real_session(*args, **kwargs))
+        return sessions[-1]
+
+    def broken_agent(*args, **kwargs):
+        raise RuntimeError("cannot build")
+
+    monkeypatch.setattr(webhooks_module, "SessionLog", recording_session)
+    monkeypatch.setattr(webhooks_module, "Agent", broken_agent)
+
+    with pytest.raises(RuntimeError, match="cannot build"):
+        webhooks_module.default_agent_factory(config, agent_cfg, hooks["/hooks/a"])
+
+    assert len(sessions) == 1 and sessions[0].closed
 
 
 def _connect(url: str) -> socket.socket:
@@ -583,7 +693,7 @@ def test_webhooks_answer_only_for_hosts_the_operator_named(
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        join_thread(thread)
 
 
 def test_webhook_rejects_oversized_body_without_reading_it(webhook_server) -> None:
@@ -724,10 +834,13 @@ def test_webhook_limits_concurrent_runs(tmp_path: Path, monkeypatch: pytest.Monk
         """,
     )
     gate = threading.Event()
+    gate_timeouts: list[bool] = []
 
     class BlockingClient(CapturingClient):
         async def chat(self, messages, tools=None) -> LLMResponse:
-            await asyncio.get_running_loop().run_in_executor(None, gate.wait, 5)
+            opened = await asyncio.get_running_loop().run_in_executor(None, gate.wait, 5)
+            if not opened:  # Event.wait reports a timeout by returning False
+                gate_timeouts.append(True)
             return await super().chat(messages, tools)
 
     client = BlockingClient()
@@ -754,7 +867,8 @@ def test_webhook_limits_concurrent_runs(tmp_path: Path, monkeypatch: pytest.Monk
         gate.set()
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        join_thread(thread)
+    assert gate_timeouts == [], "a run waited the full gate timeout: the test never released it"
 
 
 @pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "GET"])
@@ -791,3 +905,119 @@ def test_release_agent_closes_session_even_if_client_close_fails(tmp_path: Path)
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(_release_agent(agent))
     assert session.closed
+
+
+def _serve_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, factory, max_runs: int):
+    """A webhook server for ``/hooks/open`` using ``factory`` (caller stops it)."""
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(
+        tmp_path,
+        """
+        agents:
+          - name: assistant
+            tools: []
+        webhooks:
+          - path: /hooks/open
+            agent: assistant
+        """,
+    )
+    server = create_webhook_server(
+        Config.load(), "127.0.0.1", 0, agent_factory=factory, max_concurrent_runs=max_runs
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_address[1]}/hooks/open"
+
+
+def _post_until_accepted(url: str, body: bytes, timeout: float = 5.0) -> None:
+    """Retry while the server answers 429; fails if no slot frees up in time."""
+    deadline = time.monotonic() + timeout
+    while (status := _post(url, body)[0]) == 429:
+        assert time.monotonic() < deadline, "the run slot was never released"
+        time.sleep(0.01)
+    assert status == 200
+
+
+def test_webhook_admits_as_many_runs_as_max_concurrent_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = threading.Event()
+    started = threading.Semaphore(0)
+    gate_timeouts: list[bool] = []
+
+    class BlockingClient(CapturingClient):
+        async def chat(self, messages, tools=None) -> LLMResponse:
+            started.release()
+            if not await asyncio.get_running_loop().run_in_executor(None, gate.wait, 5):
+                gate_timeouts.append(True)
+            return await super().chat(messages, tools)
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        return Agent(BlockingClient(), build_tool_registry(agent_cfg.tools))
+
+    server, thread, url = _serve_with(tmp_path, monkeypatch, factory, max_runs=2)
+    try:
+        assert _post(url, b"one")[0] == 200
+        assert _post(url, b"two")[0] == 200
+        assert started.acquire(timeout=5) and started.acquire(timeout=5)  # both really run
+        assert _post(url, b"three")[0] == 429  # two slots, both held
+        gate.set()
+        _post_until_accepted(url, b"four")
+    finally:
+        gate.set()
+        server.shutdown()
+        server.server_close()
+        join_thread(thread)
+    assert gate_timeouts == []
+
+
+def test_a_failing_run_releases_its_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[str] = []
+
+    class FailingClient(CapturingClient):
+        async def chat(self, messages, tools=None) -> LLMResponse:
+            attempts.append("run")
+            raise RuntimeError("model is down")
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        return Agent(FailingClient(), build_tool_registry(agent_cfg.tools))
+
+    server, thread, url = _serve_with(tmp_path, monkeypatch, factory, max_runs=1)
+    try:
+        assert _post(url, b"one")[0] == 200  # accepted; the run then fails in the background
+        _post_until_accepted(url, b"two")  # only possible once the failed run freed the slot
+        deadline = time.monotonic() + 5
+        while len(attempts) < 2:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        server.shutdown()
+        server.server_close()
+        join_thread(thread)
+
+
+def test_a_factory_that_raises_releases_its_slot_and_answers_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+    client = CapturingClient()
+
+    def factory(cfg: Config, agent_cfg: AgentConfig, webhook: WebhookConfig) -> Agent:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("cannot build agent")
+        return Agent(client, build_tool_registry(agent_cfg.tools))
+
+    server, thread, url = _serve_with(tmp_path, monkeypatch, factory, max_runs=1)
+    try:
+        status, body = _post(url, b"one")
+        assert status == 500
+        assert "cannot build agent" in body["message"]
+        assert _post(url, b"two")[0] == 200  # the slot was returned, not leaked
+        _wait_for_prompts(client)
+    finally:
+        server.shutdown()
+        server.server_close()
+        join_thread(thread)

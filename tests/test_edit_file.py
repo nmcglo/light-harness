@@ -263,3 +263,93 @@ def test_a_failure_while_building_the_diff_leaves_the_file_untouched(
         )
 
     assert target.read_text() == ORIGINAL
+
+
+def test_an_old_text_that_occurs_twice_is_refused_and_changes_nothing(ws: Path) -> None:
+    target = ws / "notes.txt"
+    target.write_text("dup\nmiddle\ndup\n")
+
+    result = _run(ws, path="notes.txt", old_text="dup", new_text="X")
+
+    assert "Found 2 occurrences" in result
+    assert target.read_text() == "dup\nmiddle\ndup\n"
+
+
+def test_overlapping_edits_are_refused_and_change_nothing(ws: Path) -> None:
+    target = ws / "notes.txt"
+    target.write_text("abcdef\n")
+
+    result = _run(
+        ws,
+        path="notes.txt",
+        edits=[{"old_text": "abcd", "new_text": "1"}, {"old_text": "cdef", "new_text": "2"}],
+    )
+
+    assert "overlap" in result
+    assert target.read_text() == "abcdef\n"
+
+
+def test_every_edit_in_a_call_is_matched_against_the_original_file(ws: Path) -> None:
+    """Not applied one after another: the second edit cannot see the first's output."""
+    target = ws / "notes.txt"
+    target.write_text("one two\n")
+
+    result = _run(
+        ws,
+        path="notes.txt",
+        edits=[{"old_text": "one", "new_text": "two"}, {"old_text": "two", "new_text": "three"}],
+    )
+
+    assert "Successfully replaced 2 block(s)" in result
+    assert target.read_text() == "two three\n"
+
+
+def test_fuzzy_matching_finds_smart_quotes_and_leaves_other_lines_alone(ws: Path) -> None:
+    target = ws / "notes.txt"
+    original = "keep \u2018this\u2019 line  \nit\u2019s \u201cquoted\u201d\nlast\n"
+    target.write_text(original, encoding="utf-8")
+
+    result = _run(ws, path="notes.txt", old_text='it\'s "quoted"', new_text="replaced")
+
+    assert "Successfully replaced" in result
+    assert target.read_text(encoding="utf-8") == "keep \u2018this\u2019 line  \nreplaced\nlast\n"
+
+
+def test_a_bom_is_preserved_and_crlf_files_stay_crlf(ws: Path) -> None:
+    _, after = _edit_bytes(
+        ws, b"\xef\xbb\xbfone\r\ntwo\r\n", old_text="two", new_text="2\nextra"
+    )
+
+    assert after == b"\xef\xbb\xbfone\r\n2\r\nextra\r\n"
+
+
+def test_an_exact_noop_edit_is_refused(ws: Path) -> None:
+    target = ws / "notes.txt"
+    target.write_text(ORIGINAL)
+
+    result = _run(ws, path="notes.txt", old_text="second", new_text="second")
+
+    assert "No changes made" in result
+    assert target.read_text() == ORIGINAL
+
+
+def test_editing_an_empty_file_reports_not_found(ws: Path) -> None:
+    target = ws / "empty.txt"
+    target.write_bytes(b"")
+
+    result = _run(ws, path="empty.txt", old_text="anything", new_text="x")
+
+    assert "Could not find" in result
+    assert target.read_bytes() == b""
+
+
+def test_an_edit_that_would_grow_the_file_past_the_limit_is_refused(ws: Path) -> None:
+    target = ws / "huge.txt"
+    limit = 10 * 1024 * 1024
+    original = "x" * (limit - 8) + "MARK\n"
+    target.write_text(original)
+
+    result = _run(ws, path="huge.txt", old_text="MARK", new_text="M" * 40)
+
+    assert result == "Error: edited file would exceed the 10.0MB limit."
+    assert target.read_text() == original

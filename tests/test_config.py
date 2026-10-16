@@ -18,7 +18,7 @@ from light_harness.config import (
     resolve_env,
     write_persona_soul,
 )
-from light_harness.tools import build_tool_registry, builtin_tools
+from light_harness.tools import build_tool_registry
 
 CFG = """
     providers:
@@ -146,8 +146,7 @@ def test_load_yaml_missing_returns_empty(tmp_path: Path) -> None:
 def test_build_registry_default_excludes_file_tools_without_workspace(tmp_path: Path) -> None:
     assert set(build_tool_registry(None).names()) == {"echo", "current_time", "add"}
     with_ws = set(build_tool_registry(None, tmp_path).names())
-    assert with_ws == {t.name for t in builtin_tools(tmp_path)}
-    assert {"read_file", "write_file", "edit_file"} <= with_ws
+    assert with_ws == {"echo", "current_time", "add", "read_file", "write_file", "edit_file"}
     # Naming a file tool without a workspace does not enable it.
     assert build_tool_registry(["read_file", "echo"]).names() == ["echo"]
     assert build_tool_registry(["read_file"], tmp_path).names() == ["read_file"]
