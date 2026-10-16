@@ -29,7 +29,8 @@ In the REPL, replies stream in as they are generated and render as Markdown, eac
 call shows as a dim `⚙ name(args) → result` line, and a rule with the elapsed time
 closes each turn. Input history persists in
 `$LIGHT_HARNESS_HOME/history` (arrow keys, Ctrl-R), Alt-Enter inserts a newline, and
-Ctrl-C stops the current reply without leaving the chat (the partial reply stays in
+Ctrl-C clears the typed text (or leaves the chat when the prompt is empty); during a
+reply it stops that reply without leaving the chat (the partial reply stays in
 the conversation). Commands start with `/` (Tab completes them): `/help`, `/clear`,
 `/tools`, `/exit` (or `/quit`). Anything else is sent to the model.
 

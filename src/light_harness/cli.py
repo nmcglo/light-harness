@@ -351,6 +351,15 @@ def _make_reader() -> ReadLine:
     def _newline(event: KeyPressEvent) -> None:
         event.current_buffer.insert_text("\n")
 
+    @bindings.add("c-c")
+    def _clear_or_quit(event: KeyPressEvent) -> None:
+        """Ctrl-C clears what has been typed; on an empty prompt it leaves the chat."""
+        buffer = event.current_buffer
+        if buffer.text:
+            buffer.reset()
+        else:
+            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
     session: PromptSession[str] = PromptSession(
         history=history,
         completer=_CommandCompleter(),
