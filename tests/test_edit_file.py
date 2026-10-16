@@ -197,3 +197,12 @@ def test_unexpected_oserror_while_reading_gets_the_tools_own_message(
     assert "Input/output error" in result
     monkeypatch.undo()
     assert target.read_text() == ORIGINAL
+
+
+def test_write_file_reports_bytes_not_characters(ws: Path) -> None:
+    """The size limit is in bytes, so the confirmation has to be too."""
+    registry = build_tool_registry(None, ws)
+
+    result = asyncio.run(registry.run("write_file", {"path": "u.txt", "content": "h\u00e9llo"}))
+
+    assert result == "Wrote 6 bytes to u.txt."

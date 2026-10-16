@@ -65,11 +65,15 @@ text of a file with invalid YAML so the page can show what to fix, whereas the C
 lines keep theirs, a rewritten line takes the ending of the line it replaces, an inserted line its
 predecessor's — instead of rewriting every newline to the first one found; a file with a single
 ending, including lone `\r`, keeps it (regression tests in `tests/test_edit_file.py`; a mixed file
+is aligned with `difflib` over the lines between the unchanged head and tail, which is quadratic
 in the worst case), and the `edit_file` read-block `OSError` note, which the C2 restructuring had already
 fixed (any `OSError` from the locked read-modify-write is reported as `Error: OSError: ...` by the tool;
-test added in `tests/test_edit_file.py`). Everything below still describes
+test added in `tests/test_edit_file.py`), and the durability note: `atomic_write_bytes`
+(`src/light_harness/tools/workspace.py`) now fsyncs the temp file before the rename and the directory
+after it (best effort for the directory), and `write_file` reports bytes, matching its byte limit
+(tests in `tests/test_workspace.py` and `tests/test_edit_file.py`). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 198 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 201 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -99,8 +103,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 ## Low
 
-- `atomic_write_bytes`' "a crash never leaves a truncated file" holds for truncation (rename is atomic) but not
-  durability — no `fsync`. `WriteFileTool` reports characters (`261`) while the limit is bytes (`_MAX_FILE_BYTES`).
 - `SessionLog.record` (`sessions.py:40`) has no lock; concurrent appends rely on OS atomicity.
 - `state.py:23-34` (`add_user`, `add_assistant`, `add_tool`, `reset`) and `Agent.reset()` (`agent.py:34-36`) are
   unreachable API surface kept alive only by tests that do not exist.

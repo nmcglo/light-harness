@@ -286,7 +286,7 @@ class WriteFileTool:
             return f"Error: {exc}"
         except OSError as exc:
             return f"Error: {type(exc).__name__}: {exc}"
-        return f"Wrote {len(content)} characters to {path}."
+        return f"Wrote {len(data)} bytes to {path}."
 
 
 def _prepare_edits(arguments: dict[str, Any]) -> list[tuple[str, str]]:

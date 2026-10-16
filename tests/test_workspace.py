@@ -216,3 +216,23 @@ def test_deny_matches_by_identity_not_spelling(tmp_path: Path) -> None:
         ws.resolve("home/config.yaml")
     (root / "other.txt").write_text("ok")
     assert ws.resolve("other.txt") == root.resolve() / "other.txt"
+
+
+def test_atomic_write_syncs_data_before_rename_and_directory_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rename is only crash-safe if the new bytes reached the disk first, and
+    only durable once the directory entry has been synced."""
+    from light_harness.tools.workspace import atomic_write_bytes
+
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (events.append("fsync"), real_fsync(fd))[1])
+    monkeypatch.setattr(
+        os, "replace", lambda a, b: (events.append("replace"), real_replace(a, b))[1]
+    )
+
+    atomic_write_bytes(tmp_path / "f.txt", b"data")
+
+    assert events == ["fsync", "replace", "fsync"]
+    assert (tmp_path / "f.txt").read_bytes() == b"data"

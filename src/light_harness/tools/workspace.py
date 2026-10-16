@@ -113,7 +113,9 @@ def _mkstemp_respecting_umask(directory: Path, prefix: str, suffix: str) -> tupl
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` via a temp file in the same directory and an
-    atomic rename, so a crash never leaves a truncated file. An existing file's
+    atomic rename, so a crash never leaves a truncated file. The data is fsynced
+    before the rename and the directory after it, so a power loss leaves either the
+    old or the new content rather than an empty file. An existing file's
     permission bits are kept; a new file gets ``0o666`` narrowed by the umask,
     like any normal file creation."""
     try:
@@ -124,6 +126,8 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -131,6 +135,18 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+    _fsync_directory(path.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make the rename durable. Best effort: some filesystems and platforms cannot
+    open or fsync a directory, and the file itself is already safely written."""
+    with contextlib.suppress(OSError):
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 @contextlib.contextmanager
