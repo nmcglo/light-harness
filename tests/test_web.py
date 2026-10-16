@@ -745,3 +745,22 @@ def test_post_with_an_unread_body_closes_the_connection(web_base: str) -> None:
         conn.close()
 
 
+
+
+def test_binary_config_file_gets_json_errors_on_get_and_post(
+    web_base: str, tmp_path: Path
+) -> None:
+    """A config file that is not UTF-8 used to make GET raise inside the handler
+    (no response at all); both verbs now answer with a JSON error."""
+    cfg = tmp_path / "config.yaml"
+    blob = b"\xff\xfe\x00binary"
+    cfg.write_bytes(blob)
+
+    status, data = _get_json(web_base + "/api/config")
+    assert status == 500
+    assert "Cannot read" in data["error"]
+
+    status, data = _post(web_base + "/api/config", {"providers": []})
+    assert status == 400
+    assert data["ok"] is False
+    assert cfg.read_bytes() == blob

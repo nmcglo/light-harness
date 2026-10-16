@@ -54,9 +54,15 @@ not hold: the BOM is unchanged by an edit so its absence from the diff is correc
 normalization-insensitive filesystem is refused, and refuses an existing file with more than one hard
 link, since its other names may be in a denied directory or outside the workspace (regression tests in
 `tests/test_workspace.py`; the identity check is exercised with a symlink alias, not on a real
-case-insensitive filesystem). Everything below still describes
+case-insensitive filesystem),
+and **W2**: `GET /api/config` (`src/light_harness/web.py`) now answers 500 with a JSON `error` when the
+config file is unreadable or not UTF-8 instead of raising inside the handler, and the page shows that
+error instead of rendering `undefined` (regression test in `tests/test_web.py`). The other half of W2 is
+deliberate, not a bug: `POST` already turned a `ConfigError` into a 400, and `GET` still returns the raw
+text of a file with invalid YAML so the page can show what to fix, whereas the CLI aborts. Everything
+below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 194 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 195 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -82,15 +88,10 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| W2 | `web.py` | Unguarded `read_text`; inconsistent `ConfigError` handling | low | inference |
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Low
 
-- **W2** — `web.py:833` `path.read_text(encoding="utf-8")` is unguarded: a binary config file raises
-  `UnicodeDecodeError` → no response, traceback in the server log. `ConfigError` is a `ValueError` subclass
-  (`config.py:150`), so `web.py:822` turns a broken config into a 400, while the CLI aborts the command — the
-  same input behaves differently in the two entry points.
 - **Mixed line endings (was part of E2)** — `edit_file` normalizes the whole file to LF and writes it back
   with the single ending `detect_line_ending` found first, so a file mixing CRLF and LF (or lone `\r`)
   comes back uniform after any edit. Unchanged by the E2 fix; fixing it needs per-line ending tracking

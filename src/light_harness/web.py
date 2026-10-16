@@ -17,7 +17,8 @@ Endpoints:
 - ``GET  /``            -> the HTML page
 - ``GET  /api/config``  -> ``{"exists", "path", "text", "data"}`` (``data`` shows
                            each persona's stored ``SOUL.md``; ``text`` is the
-                           config file verbatim)
+                           config file verbatim; a file that cannot be read or
+                           is not UTF-8 gets a 500 ``{"error"}`` instead)
 - ``GET  /api/tools``   -> ``{"tools": [...]}`` (built-in tool names)
 - ``POST /api/config``  -> JSON body naming any of ``providers``, ``agents``,
                            ``personas``, ``interaction``; only the sections the
@@ -481,6 +482,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   async function fetchConfig() {
     var res = await apiFetch("/api/config");
     var data = await res.json();
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
     pathEl.value = data.path;
     state.lastText = data.text == null ? "" : data.text;
     state.fileDirty = false;
@@ -597,6 +599,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   setInterval(async function () {
     try {
       var res = await apiFetch("/api/config");
+      if (!res.ok) return;
       var data = await res.json();
       var text = data.text == null ? "" : data.text;
       if (text === state.lastText) return;
@@ -1019,7 +1022,11 @@ class ConfigHandler(BaseHTTPRequestHandler):
     def _handle_get_config(self) -> None:
         path = config_file_path()
         if path.exists():
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, ValueError) as exc:  # unreadable, or not UTF-8 text
+                self._send_json(500, {"error": f"Cannot read {path}: {exc}"})
+                return
             data: dict[str, Any] = {}
             try:
                 loaded = yaml.safe_load(text)
