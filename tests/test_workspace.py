@@ -12,6 +12,7 @@ import pytest
 
 from light_harness.config import Config
 from light_harness.tools import build_tool_registry
+from light_harness.tools.workspace import Workspace, WorkspaceError
 
 
 @pytest.fixture()
@@ -177,3 +178,41 @@ def test_config_fails_closed_on_bad_workspace(
         "write_file",
         "edit_file",
     }
+
+
+def test_hard_linked_file_is_refused(tmp_path: Path) -> None:
+    """A second name for a file in the workspace may be a name for a secret outside
+    it; ``resolve()`` cannot tell, so such files are not served."""
+    secret_dir = tmp_path / "home"
+    secret_dir.mkdir()
+    secret = secret_dir / "config.yaml"
+    secret.write_text("api_key: x")
+    root = tmp_path / "ws"
+    root.mkdir()
+    os.link(secret, root / "innocent.txt")
+    (root / "plain.txt").write_text("ok")
+    ws = Workspace(root, deny=[secret_dir])
+
+    with pytest.raises(WorkspaceError, match="hard links"):
+        ws.resolve("innocent.txt")
+    assert ws.resolve("plain.txt") == root.resolve() / "plain.txt"
+
+
+def test_deny_matches_by_identity_not_spelling(tmp_path: Path) -> None:
+    """On a case-insensitive filesystem ``.LIGHT-HARNESS`` is the denied directory
+    under another spelling. Emulated with a symlink, which ``resolve()`` has already
+    followed for the candidate but which the deny entry never went through."""
+    root = tmp_path / "ws"
+    root.mkdir()
+    home = root / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("api_key: x")
+    ws = Workspace(root, deny=[home])
+    alias = tmp_path / "alias"
+    alias.symlink_to(home)
+    ws.deny = (alias,)  # spelled differently from the candidate's real path
+
+    with pytest.raises(WorkspaceError, match="not accessible"):
+        ws.resolve("home/config.yaml")
+    (root / "other.txt").write_text("ok")
+    assert ws.resolve("other.txt") == root.resolve() / "other.txt"

@@ -10,7 +10,11 @@ Limitation: the check and the later open are separate steps, so someone else on
 the machine who can swap a directory for a symlink in between could still escape.
 An existing path must also be a *regular* file: a FIFO, socket or device reports
 ``st_size`` 0, so the size limit would not stop it, and reading one blocks the
-tool forever. The tools never create symlinks themselves.
+tool forever. A file with more than one hard link is refused too, since its other
+names may be outside the workspace or in a ``deny`` directory. A ``deny`` directory
+is matched by identity (device and inode) as well as by path, so a different
+spelling of it on a case-insensitive filesystem is still refused. The tools never
+create symlinks themselves.
 """
 
 from __future__ import annotations
@@ -56,17 +60,41 @@ class Workspace:
             )
         if not candidate.is_relative_to(self.root):
             raise WorkspaceError(f"path is outside the workspace: {raw}")
-        if any(candidate.is_relative_to(d) for d in self.deny):
+        if self._is_denied(candidate):
             raise WorkspaceError(f"path is not accessible: {raw}")
         try:
-            mode = candidate.stat().st_mode
+            info = candidate.stat()
         except FileNotFoundError:
             return candidate  # write_file is allowed to create it
+        mode = info.st_mode
         if stat.S_ISDIR(mode):
             raise WorkspaceError(f"path is a directory, not a file: {raw}")
         if not stat.S_ISREG(mode):
             raise WorkspaceError(f"path is not a regular file (FIFO, socket or device): {raw}")
+        if info.st_nlink > 1:
+            # Another name for this inode may live anywhere, including in a denied
+            # directory, and ``resolve()`` cannot see it. The tools never create
+            # hard links, and an atomic write replaces the file, so none are expected.
+            raise WorkspaceError(f"path has multiple hard links: {raw}")
         return candidate
+
+    def _is_denied(self, candidate: Path) -> bool:
+        """Whether ``candidate`` is, or lies inside, a denied directory.
+
+        The lexical test is not enough on a case-insensitive or
+        normalization-insensitive filesystem (``.LIGHT-HARNESS`` is the same
+        directory as ``.light-harness``), so every existing ancestor is also
+        compared by identity (device and inode) with each denied directory."""
+        if any(candidate.is_relative_to(d) for d in self.deny):
+            return True
+        for ancestor in (candidate, *candidate.parents):
+            for denied in self.deny:
+                try:
+                    if ancestor.samefile(denied):
+                        return True
+                except OSError:  # a missing ancestor or deny directory has no identity
+                    continue
+        return False
 
 
 def _mkstemp_respecting_umask(directory: Path, prefix: str, suffix: str) -> tuple[int, str]:

@@ -4,7 +4,7 @@ Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; 
 behaviour was changed.
 
 **Update 2026-10-12:** the review's one high-severity finding, **B1**, **B2**, **C1**, **C2**, **D1**, **E2**, **L1**, **S1**, **S2**,
-**S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
+**S3**, **S4** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
 umask/root handling in `src/light_harness/tools/workspace.py` (regression tests in
@@ -48,9 +48,15 @@ of silently ASCII-fying the line, and a unique exact match such as `"hello "` in
 longer rejected as a fuzzy duplicate (regression tests in `tests/test_edit_file.py`); the
 `_apply_preserving_lines` docstring now says touched lines take the fuzzy normalization. Two E2 claims did
 not hold: the BOM is unchanged by an edit so its absence from the diff is correct, and
-`detect_line_ending("a\rb\r\nc")` returns CRLF. Everything below still describes
+`detect_line_ending("a\rb\r\nc")` returns CRLF, and **S4**: `Workspace.resolve`
+(`src/light_harness/tools/workspace.py`) now also matches a `deny` directory by identity
+(`samefile` on every existing ancestor), so a different spelling of it on a case-insensitive or
+normalization-insensitive filesystem is refused, and refuses an existing file with more than one hard
+link, since its other names may be in a denied directory or outside the workspace (regression tests in
+`tests/test_workspace.py`; the identity check is exercised with a symlink alias, not on a real
+case-insensitive filesystem). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
-pre-fix. Current baseline: `uv run pytest -q` 192 passed, `ruff` and `mypy` clean.
+pre-fix. Current baseline: `uv run pytest -q` 194 passed, `ruff` and `mypy` clean.
 
 **Baseline checks**
 
@@ -76,17 +82,11 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| S4 | `tools/workspace.py` | Deny check is lexical (case-insensitive FS) and blind to hardlinks | low | inference |
 | W2 | `web.py` | Unguarded `read_text`; inconsistent `ConfigError` handling | low | inference |
 | X1 | `tests/` | Coverage gaps on the highest-risk paths | medium | inference |
 
 ## Low
 
-- **S4** — `workspace.py:47` `is_relative_to` compares `PurePath` parts as strings and `resolve()` does not
-  canonicalize case, so on case-insensitive filesystems (macOS/Windows) `path="../.LIGHT-HARNESS/config.yaml"`
-  is the same file as the denied home and its API keys are readable. Platform-conditional; no test. NFC/NFD
-  decomposed names on APFS have the same shape. `resolve()` follows symlinks only, so a hardlink inside the
-  workspace reads as "inside" and leaks content (writes are safe by accident — `os.replace` breaks the link).
 - **W2** — `web.py:833` `path.read_text(encoding="utf-8")` is unguarded: a binary config file raises
   `UnicodeDecodeError` → no response, traceback in the server log. `ConfigError` is a `ValueError` subclass
   (`config.py:150`), so `web.py:822` turns a broken config into a 400, while the CLI aborts the command — the

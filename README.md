@@ -81,7 +81,8 @@ The file is sectioned:
   `persona` (a key into `personas:`). The file tools (`read_file`, `write_file`,
   `edit_file`) are only available to an agent with a `workspace`: an absolute
   directory they are confined to. `../` traversal, absolute paths outside it, and
-  symlinks pointing out of it are refused, and a workspace that contains (or sits
+  symlinks pointing out of it are refused, as are files with more than one hard
+  link (another name may sit outside the workspace), and a workspace that contains (or sits
   inside) `LIGHT_HARNESS_HOME` is rejected because that holds `config.yaml` with
   your keys. A bad workspace disables the file tools and prints a `Config warning`.
   A `tools:` name that is not a built-in prints a `Config warning` and is ignored.
