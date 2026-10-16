@@ -3,8 +3,9 @@
 ``agent webhooks`` starts a small HTTP server (stdlib ``http.server``, matching
 ``web.py``) that routes POSTs to the paths named in the ``webhooks:`` config
 section. Each webhook hands the parsed request body to its configured agent and
-returns the agent's answer. A webhook can optionally require a bearer secret in
-the ``Authorization`` header.
+acknowledges the POST immediately (200 ``OK``); the agent runs in a background
+thread and its answer is not returned to the caller. A webhook can optionally
+require a bearer secret in the ``Authorization`` header.
 
 Every request must also carry a ``Host`` header that names this server -- a
 loopback name, an IP address, the bind host, or one passed as ``allowed_hosts``

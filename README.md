@@ -164,8 +164,12 @@ not open to arbitrary web pages even though CORS defaults to `*`:
 `agent webhooks` serves the webhooks named in the `webhooks:` config section on a
 local HTTP server (no extra dependencies; binds to `127.0.0.1:8787` by default).
 Each POST to a configured `path` runs that webhook's `agent` with the parsed
-request body (JSON is re-serialized; non-JSON is passed through as text) and
-returns the agent's answer. A webhook with a `secret` requires the request to
+request body (JSON is re-serialized; non-JSON is passed through as text). The
+server acknowledges immediately with `200 {"agent": ..., "message": "OK"}` once
+the agent has been built, and runs it in the background: the agent's answer is
+not returned to the caller (a failed run is only printed to stderr), and a run
+that cannot start gets a 500. Concurrent runs are capped; POSTs over the cap
+get 429. A webhook with a `secret` requires the request to
 carry `Authorization: Bearer <secret>`; others are unauthenticated.
 
 Every request must also carry a `Host` header that names the server -- a loopback

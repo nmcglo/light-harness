@@ -3,7 +3,7 @@
 Analysis of `light-harness` at commit `f6d9be1` (2026-10-11). Read-only review; no
 behaviour was changed.
 
-**Update 2026-10-12:** the review's one high-severity finding, **B1**, **C1**, **S1**, **S2**,
+**Update 2026-10-12:** the review's one high-severity finding, **B1**, **C1**, **D1**, **S1**, **S2**,
 **S3** and **P1** are fixed and no longer listed here — `src/light_harness/tools/edit_diff.py`
 (regression tests in `tests/test_edit_file.py`), `read_file`'s `offset`/`limit` handling in
 `src/light_harness/tools/builtin.py` (regression tests in `tests/test_read_file.py`), the
@@ -26,7 +26,9 @@ timeout: the file tools now hand their blocking disk work to a worker thread
 and the loop keeps running while a call is stalled, and `Workspace.resolve` refuses any
 existing path that is not a regular file — the FIFO behind the original repro is rejected
 before anything opens it (`src/light_harness/tools/workspace.py`; regression tests in
-`tests/test_tool_timeout.py`; README caveats updated). Everything below still describes
+`tests/test_tool_timeout.py`; README caveats updated), and the **D1** documentation: the README
+and `webhooks.py` docstring now say a webhook POST is acknowledged at once and the agent's answer
+is not returned (the code was correct). Everything below still describes
 `f6d9be1`, and its `config.py`, `edit_diff.py`, `web.py` and `workspace.py` line numbers are
 pre-fix. Current baseline: `uv run pytest -q` 182 passed, `ruff` and `mypy` clean.
 
@@ -54,7 +56,6 @@ Verification: *verified* = reproduced against the live code; *inference* = read 
 
 | ID | Area | Issue | Severity | Verified |
 | --- | --- | --- | --- | --- |
-| D1 | `README.md`, `webhooks.py` | Docs say POST returns the agent's answer; code acks immediately | medium | yes |
 | B2 | `tools/builtin.py` | Non-string `edit_file` entries silently dropped | low | yes |
 | C2 | `tools/builtin.py` | No locking on read-modify-write | medium | inference |
 | L1 | `llm.py` | Unguarded response shape (`choices[0]`, malformed tool_call) | medium | inference |
