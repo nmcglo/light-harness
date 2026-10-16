@@ -21,7 +21,7 @@ Endpoints:
                            is not UTF-8 gets a 500 ``{"error"}`` instead)
 - ``GET  /api/tools``   -> ``{"tools": [...]}`` (built-in tool names)
 - ``POST /api/config``  -> JSON body naming any of ``providers``, ``agents``,
-                           ``personas``, ``interaction``; only the sections the
+                           ``personas``, ``interaction``, ``webhooks``; only the sections the
                            body sends are rewritten (as YAML), the others are kept
                            exactly as they are on disk, and a persona entry that
                            sends ``SOUL.md`` rewrites that persona's file
@@ -152,6 +152,12 @@ _PAGE_CSS = """  :root {
   .tool-all-row { display: flex; align-items: center; gap: 8px; font-size: 13px;
     color: var(--muted); margin-bottom: 8px; }
   .tool-all-row input { width: auto; }
+  .page { display: none; }
+  .page.active { display: block; }
+  .webhook { margin-bottom: 14px; }
+  .webhook-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .webhook-path { flex: 1; font-weight: 600; font-size: 14px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; }
 </style>
 </head>
 """
@@ -160,10 +166,14 @@ _PAGE_BODY = """<body>
   <aside class="sidebar">
     <div class="brand">light-harness</div>
     <nav class="nav">
-      <a href="#config" class="active">Config</a>
+      <a href="#providers" data-page="providers">Providers</a>
+      <a href="#agents" data-page="agents">Agents</a>
+      <a href="#personas" data-page="personas">Personas</a>
+      <a href="#chat" data-page="chat">Chat</a>
+      <a href="#webhooks" data-page="webhooks">Webhooks</a>
     </nav>
   </aside>
-  <main class="content" id="config">
+  <main class="content">
     <div class="topbar">
       <div class="path-field">
         <span class="lbl">Config file</span>
@@ -175,30 +185,37 @@ _PAGE_BODY = """<body>
         <button id="save" class="primary" type="button">Save</button>
       </div>
     </div>
-    <section class="section">
+    <section class="section page" id="page-providers">
       <div class="section-head">
         <h2>Providers</h2>
         <button id="add-provider" class="ghost" type="button">+ Add provider</button>
       </div>
       <div id="provider-list"></div>
     </section>
-    <section class="section">
+    <section class="section page" id="page-agents">
       <div class="section-head">
         <h2>Agents</h2>
         <button id="add-agent" class="ghost" type="button">+ Add agent</button>
       </div>
       <div id="agent-list"></div>
     </section>
-    <section class="section">
+    <section class="section page" id="page-personas">
       <div class="section-head">
         <h2>Personas</h2>
         <button id="add-persona" class="ghost" type="button">+ Add persona</button>
       </div>
       <div id="persona-list"></div>
     </section>
-    <section class="section">
-      <div class="section-head"><h2>Interaction</h2></div>
+    <section class="section page" id="page-chat">
+      <div class="section-head"><h2>Chat</h2></div>
       <div id="interaction-section"></div>
+    </section>
+    <section class="section page" id="page-webhooks">
+      <div class="section-head">
+        <h2>Webhooks</h2>
+        <button id="add-webhook" class="ghost" type="button">+ Add webhook</button>
+      </div>
+      <div id="webhook-list"></div>
     </section>
   </main>
 </div>
@@ -224,6 +241,8 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   var addProviderBtn = document.getElementById("add-provider");
   var addAgentBtn = document.getElementById("add-agent");
   var addPersonaBtn = document.getElementById("add-persona");
+  var webhookList = document.getElementById("webhook-list");
+  var addWebhookBtn = document.getElementById("add-webhook");
 
   function esc(v) {
     return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
@@ -372,6 +391,49 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     return h.join("");
   }
 
+  function agentOptions(selected) {
+    var names = agentNamesFromDom();
+    if (selected && names.indexOf(selected) === -1) names.unshift(selected);
+    return names.map(function (n) {
+      var sel = n === selected ? " selected" : "";
+      return '<option value="' + esc(n) + '"' + sel + ">" + esc(n) + "</option>";
+    }).join("");
+  }
+
+  function webhookCard(w) {
+    w = w || {};
+    var h = [];
+    h.push('<div class="card webhook" data-webhook>');
+    h.push('<div class="webhook-head">');
+    h.push('<input class="webhook-path" value="' + esc(w.path || "") +
+      '" placeholder="/hooks/name">');
+    h.push('<button class="icon remove-webhook" type="button" ' +
+      'title="Remove webhook">&times;</button>');
+    h.push('</div>');
+    h.push('<div class="grid two">');
+    h.push('<label><span>Agent</span><select class="webhook-agent">' +
+      agentOptions(w.agent || "") + "</select></label>");
+    h.push(field("Secret (bearer token; empty = unauthenticated)", "webhook-secret",
+      w.secret || "", "$MY_WEBHOOK_SECRET"));
+    h.push('</div>');
+    h.push('<label><span>System prompt (optional; overrides the default agent prompt)</span>' +
+      '<textarea class="webhook-prompt" placeholder="You are ...">' +
+      esc(w.system_prompt || "") + "</textarea></label>");
+    h.push("</div>");
+    return h.join("");
+  }
+
+  function showPage() {
+    var page = location.hash.replace("#", "");
+    if (!document.getElementById("page-" + page)) page = "providers";
+    document.querySelectorAll(".page").forEach(function (el) {
+      el.classList.toggle("active", el.id === "page-" + page);
+    });
+    document.querySelectorAll(".nav a").forEach(function (a) {
+      a.classList.toggle("active", a.dataset.page === page);
+    });
+  }
+
   function renderInteraction() {
     var sel = interactionSection.querySelector(".interaction-agent");
     var current = sel ? sel.value : ((state.data.interaction && state.data.interaction.chat)
@@ -404,6 +466,10 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
       ? agents.map(function (a) { return agentCard(a); }).join("")
       : '<p class="empty">No agents defined. Add one to configure the chat loop.</p>';
     renderInteraction();
+    var webhooks = state.data.webhooks || [];
+    webhookList.innerHTML = webhooks.length
+      ? webhooks.map(function (w) { return webhookCard(w); }).join("")
+      : '<p class="empty">No webhooks defined. Add one to trigger an agent over HTTP.</p>';
     syncAllToolsDisabled();
   }
 
@@ -425,6 +491,9 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
       if (personaSel) personaSel.innerHTML = personaOptions(personaSel.value);
     });
     renderInteraction();
+    document.querySelectorAll(".webhook-agent").forEach(function (sel) {
+      sel.innerHTML = agentOptions(sel.value);
+    });
   }
 
   function collectProviders() {
@@ -479,6 +548,17 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     return { chat: { agent: agent } };
   }
 
+  function collectWebhooks() {
+    return Array.from(webhookList.querySelectorAll("[data-webhook]")).map(function (card) {
+      return {
+        path: card.querySelector(".webhook-path").value.trim(),
+        agent: card.querySelector(".webhook-agent").value || "",
+        secret: card.querySelector(".webhook-secret").value.trim(),
+        system_prompt: card.querySelector(".webhook-prompt").value
+      };
+    });
+  }
+
   async function fetchConfig() {
     var res = await apiFetch("/api/config");
     var data = await res.json();
@@ -507,7 +587,8 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
         providers: collectProviders(),
         agents: collectAgents(),
         personas: collectPersonas(),
-        interaction: collectInteraction()
+        interaction: collectInteraction(),
+        webhooks: collectWebhooks()
       });
       var res = await apiFetch("/api/config", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: body
@@ -573,6 +654,22 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
 
   interactionSection.addEventListener("change", markDirty);
 
+  webhookList.addEventListener("click", function (e) {
+    if (e.target.classList.contains("remove-webhook")) {
+      e.target.closest("[data-webhook]").remove(); markDirty();
+    }
+  });
+  webhookList.addEventListener("input", markDirty);
+  webhookList.addEventListener("change", markDirty);
+  addWebhookBtn.addEventListener("click", function () {
+    var empty = webhookList.querySelector(".empty");
+    if (empty) empty.remove();
+    webhookList.insertAdjacentHTML("beforeend", webhookCard({}));
+    markDirty();
+  });
+  window.addEventListener("hashchange", showPage);
+  showPage();
+
   addProviderBtn.addEventListener("click", function () {
     var empty = providerList.querySelector(".empty");
     if (empty) empty.remove();
@@ -637,7 +734,13 @@ def _yaml_number(text: str) -> int | float | str | None:
     return int(value) if value.is_integer() else value
 
 
-_MANAGED_SECTIONS: tuple[str, ...] = ("providers", "agents", "personas", "interaction")
+_MANAGED_SECTIONS: tuple[str, ...] = (
+    "providers",
+    "agents",
+    "personas",
+    "interaction",
+    "webhooks",
+)
 
 
 def _section_sent(payload: dict[str, Any], section: str) -> bool:
@@ -848,6 +951,31 @@ def _interaction_from_form(raw: Any) -> dict[str, Any]:
     return interaction
 
 
+def _webhooks_from_form(raw: Any) -> list[dict[str, Any]]:
+    """Build the file's ``webhooks:`` list from the form's webhook entries.
+
+    Each entry needs a ``path`` starting with ``/`` (unique); ``agent``,
+    ``secret`` and ``system_prompt`` are written only when non-empty.
+    """
+    webhooks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, any_entry in enumerate(_form_entries(raw, "webhooks")):
+        entry = _form_entry(any_entry, "webhooks", index)
+        path = _form_text(entry, "path", f"webhooks[{index}]")
+        if not path.startswith("/"):
+            raise ValueError(f"webhooks[{index}]: path must start with '/'.")
+        if path in seen:
+            raise ValueError(f"webhooks[{index}]: duplicate path {path!r}.")
+        seen.add(path)
+        item: dict[str, Any] = {"path": path}
+        for key in ("agent", "secret", "system_prompt"):
+            text = _form_text(entry, key, f"webhooks[{index}]")
+            if text:
+                item[key] = text
+        webhooks.append(item)
+    return webhooks
+
+
 def _build_section(section: str, raw: Any, current: Any) -> Any:
     """Build one managed section from the body's value for it."""
     if section == "providers":
@@ -856,25 +984,28 @@ def _build_section(section: str, raw: Any, current: Any) -> Any:
         return _agents_from_form(raw)
     if section == "personas":
         return _personas_from_form(raw, current)
-    return _interaction_from_form(raw)
+    if section == "interaction":
+        return _interaction_from_form(raw)
+    return _webhooks_from_form(raw)
 
 
 def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """Build the config mapping from the form JSON.
 
-    The form manages ``providers``, ``agents``, ``personas``, and ``interaction``.
+    The form manages ``providers``, ``agents``, ``personas``, ``interaction`` and
+    ``webhooks``.
     A managed section is rewritten only when the body *sends* it: a section that
     is absent (or ``null``) is carried over exactly as it is on disk, so a body
     that touches one section can never wipe the others, and a body that sends no
     managed section at all is refused. A section the body does send replaces its
     previous value -- an empty list clears it. Top-level keys the form never
-    manages (e.g. ``webhooks``) are always carried over. A section whose shape is
+    manages are always carried over. A section whose shape is
     wrong is rejected with an error instead of being silently dropped.
     """
     if not any(_section_sent(payload, section) for section in _MANAGED_SECTIONS):
         raise ValueError(
             "Nothing to save: the body must send at least one of providers, "
-            "agents, personas or interaction."
+            "agents, personas, interaction or webhooks."
         )
 
     data: dict[str, Any] = {}
@@ -888,8 +1019,8 @@ def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict
         if value:  # a section emptied through the form is written as no section
             data[section] = value
 
-    # Carry over top-level keys the form doesn't manage (e.g. ``webhooks``) so a
-    # save via the UI never drops them.
+    # Carry over top-level keys the form doesn't manage so a save via the UI
+    # never drops them.
     for key, value in current.items():
         if key not in _MANAGED_SECTIONS:
             data[key] = value
@@ -1166,21 +1297,22 @@ def create_server(
     return server
 
 
-def serve_config(
+def start_config_server(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     cors_origin: str | None = "*",
     allowed_hosts: Sequence[str] = (),
-) -> None:
-    """Run the config web server until interrupted (blocking)."""
+) -> ConfigServer:
+    """Bind the config web server and serve it from a daemon thread.
+
+    Binding happens in the caller, so a bad origin or busy port raises here.
+    The caller owns the returned server: ``shutdown()`` then ``server_close()``.
+    """
+    import threading
+
     server = create_server(host, port, cors_origin, allowed_hosts)
     print(f"Serving config UI at http://{host}:{port}/")
     print(f"Config file: {config_file_path()}")
-    print(f"CORS allow-origin: {cors_origin or '(disabled)'}")
     print(f"API token (send as 'X-Agent-Token' to call /api/* directly): {server.token}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    threading.Thread(target=server.serve_forever, daemon=True, name="config-webui").start()
+    return server

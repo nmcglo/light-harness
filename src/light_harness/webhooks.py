@@ -25,6 +25,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
+from rich.console import Console
+from rich.table import Table
+
 from .agent import Agent
 from .config import AgentConfig, Config, WebhookConfig, ensure_persona, persona_sessions_dir
 from .httputil import (
@@ -325,6 +328,35 @@ def tool_availability_warning(config: Config) -> str | None:
     )
 
 
+def _effective_tools(config: Config, webhook: WebhookConfig) -> str:
+    """Names of the tools the webhook's agent actually gets, as the run builds them."""
+    agent = config.get_agent(webhook.agent)
+    if agent is None:
+        return "[red]agent not defined[/red]"
+    registry = build_tool_registry(agent.tools, agent.workspace_path())
+    names = [spec["function"]["name"] for spec in registry.tool_schemas()]
+    return ", ".join(names) or "(none)"
+
+
+def webhook_summary(config: Config, host: str, port: int) -> Table:
+    """A table with one row per active webhook: URL, agent, auth, prompt and tools."""
+    table = Table(title=f"{len(config.webhooks)} webhook(s)", title_justify="left")
+    table.add_column("URL", overflow="fold")
+    table.add_column("Agent")
+    table.add_column("Auth")
+    table.add_column("System prompt")
+    table.add_column("Tools", overflow="fold")
+    for w in config.webhooks:
+        table.add_row(
+            f"http://{host}:{port}{w.path}",
+            w.agent,
+            "bearer secret" if w.secret else "[yellow]none[/yellow]",
+            "custom" if w.system_prompt else "agent default",
+            _effective_tools(config, w),
+        )
+    return table
+
+
 def serve_webhooks(
     config: Config,
     host: str = DEFAULT_HOST,
@@ -333,7 +365,8 @@ def serve_webhooks(
 ) -> None:
     """Run the webhook server until interrupted (blocking)."""
     server = create_webhook_server(config, host, port, allowed_hosts=allowed_hosts)
-    print(f"Serving {len(config.webhooks)} webhook(s) at http://{host}:{port}/")
+    print(f"Webhook server listening on http://{host}:{port}/")
+    Console().print(webhook_summary(config, host, port))
     warning = unauthenticated_warning(config)
     if warning:
         print(warning, file=sys.stderr)

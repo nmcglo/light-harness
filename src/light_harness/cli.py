@@ -46,7 +46,9 @@ from .llm import LLMError, OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
 from .tui import TurnView, glyphs_for, is_interactive
-from .web import serve_config
+from .web import DEFAULT_HOST as WEBUI_DEFAULT_HOST
+from .web import DEFAULT_PORT as WEBUI_DEFAULT_PORT
+from .web import ConfigServer, start_config_server
 from .webhooks import DEFAULT_HOST, DEFAULT_PORT, serve_webhooks
 
 app = typer.Typer(help="Run LLM agents in response to chat prompts and webhooks.")
@@ -112,6 +114,9 @@ def chat(
     base_url: Annotated[
         str | None, typer.Option("--base-url", help="OpenAI-compatible base URL.")
     ] = None,
+    webui: WebuiOpt = False,
+    webui_host: WebuiHostOpt = WEBUI_DEFAULT_HOST,
+    webui_port: WebuiPortOpt = WEBUI_DEFAULT_PORT,
 ) -> None:
     """Run a single prompt, or drop into an interactive REPL."""
     config = _load_config()
@@ -141,9 +146,11 @@ def chat(
         meta={"persona": persona_name, "agent": active.name, "model": settings.model},
     )
     agent = _build_agent(settings, registry, system_prompt, session=session)
+    ui = _start_webui(webui, webui_host, webui_port)
     try:
         asyncio.run(_run_agent(agent, prompt))
     finally:
+        _stop_webui(ui)
         session.close()
 
 
@@ -157,39 +164,31 @@ def tools() -> None:
         console.print(f"[bold]{fn['name']}[/bold] -- {fn['description']}")
 
 
-@app.command()
-def web(
-    host: Annotated[str, typer.Option("--host", help="Bind host.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", help="Bind port.")] = 8765,
-    cors_origin: Annotated[
-        str,
-        typer.Option(
-            "--cors-origin",
-            help=(
-                "Access-Control-Allow-Origin for /api/*: '*' or a bare origin such as "
-                "https://ui.example[:port] (empty disables CORS)."
-            ),
-        ),
-    ] = "*",
-    allowed_host: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--allowed-host",
-            help=(
-                "Host name this server answers for, besides loopback names, IP "
-                "addresses and the bind host. Repeat for every name it is reached by."
-            ),
-        ),
-    ] = None,
-) -> None:
-    """Serve a web UI for viewing and editing the config file."""
+WebuiOpt = Annotated[
+    bool, typer.Option("--webui", help="Also serve the config web UI in the background.")
+]
+WebuiHostOpt = Annotated[
+    str, typer.Option("--webui-host", help="Web UI bind host (with --webui).")
+]
+WebuiPortOpt = Annotated[
+    int, typer.Option("--webui-port", help="Web UI bind port (with --webui).")
+]
+
+
+def _start_webui(enabled: bool, host: str, port: int) -> ConfigServer | None:
+    if not enabled:
+        return None
     try:
-        serve_config(
-            host=host, port=port, cors_origin=cors_origin, allowed_hosts=allowed_host or ()
-        )
-    except ValueError as exc:  # a --cors-origin that is not a valid origin
-        err_console.print(f"[red]Error:[/red] {exc}")
+        return start_config_server(host=host, port=port)
+    except OSError as exc:  # port busy / bad host
+        err_console.print(f"[red]Error:[/red] web UI: {exc}")
         raise typer.Exit(code=1) from None
+
+
+def _stop_webui(server: ConfigServer | None) -> None:
+    if server is not None:
+        server.shutdown()
+        server.server_close()
 
 
 @app.command()
@@ -206,9 +205,18 @@ def webhooks(
             ),
         ),
     ] = None,
+    webui: WebuiOpt = False,
+    webui_host: WebuiHostOpt = WEBUI_DEFAULT_HOST,
+    webui_port: WebuiPortOpt = WEBUI_DEFAULT_PORT,
 ) -> None:
     """Serve the configured webhook listeners (the ``webhooks:`` section)."""
-    serve_webhooks(_load_config(), host=host, port=port, allowed_hosts=allowed_host or ())
+    config = _load_config()
+    ui = _start_webui(webui, webui_host, webui_port)
+    try:
+        serve_webhooks(config, host=host, port=port, allowed_hosts=allowed_host or ())
+    finally:
+        _stop_webui(ui)
+
 
 
 async def _run_agent(agent: Agent, prompt: str) -> None:
