@@ -1,45 +1,40 @@
 # light-harness
 
-A lightweight agentic harness for personal use, primarily to act as a
-automated responder to triggers. Obviously more polished harnesses exist
-that can serve that purpose but they all have tended to be susceptible to
-feature bloat and instability from vibe-coding.
+A lightweight agentic harness for personal use, mainly as an automated
+responder to triggers (webhooks). More polished harnesses exist, but they tend
+to suffer from feature bloat and instability from vibe-coding.
 
-Additionally, I just wanted to know that I could.
+Also, I just wanted to know that I could.
 
-This harness has basic python defined tools that can be called by supporting
-models.
+Models that support tool calling can call the harness's built-in tools, which
+are written in Python.
 
+## Contents
+
+- [Quickstart](#quickstart)
+- [Chat REPL](#chat-repl)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [Built-in tools](#built-in-tools)
+- [Web config UI](#web-config-ui)
+- [Webhook listeners](#webhook-listeners)
+- [Extending it](#extending-it)
 
 ## Quickstart
 
 ```sh
-uv sync --group dev        # create .venv, install deps, write uv.lock
-cp .env.example .env       # secrets referenced from config.yaml as $NAME; `agent` loads ./.env (and ~/.light-harness/.env)
-cp config.yaml.example ~/.light-harness/config.yaml   # then edit
+uv sync --group dev                                  # create .venv, install deps, write uv.lock
+cp .env.example .env                                 # secrets, referenced from config as $NAME
+cp config.yaml.example ~/.light-harness/config.yaml  # then edit
 
-uv run agent tools         # list the built-in example tools
-uv run agent chat "What is 2 + 3?"
-uv run agent chat          # interactive REPL
-uv run agent web             # edit the config in a local web UI
-uv run agent webhooks          # serve the configured webhook listeners
+uv run agent tools                  # list the built-in tools
+uv run agent chat "What is 2 + 3?"  # one-shot
+uv run agent chat                   # interactive REPL
+uv run agent web                    # edit the config in a local web UI
+uv run agent webhooks               # serve the configured webhook listeners
 ```
 
-In the REPL, replies stream in as they are generated and render as Markdown, each tool
-call shows as a dim `⚙ name(args) → result` line, and a rule with the elapsed time
-closes each turn. Input history persists in
-`$LIGHT_HARNESS_HOME/history` (arrow keys, Ctrl-R), Alt-Enter inserts a newline, and
-Ctrl-C clears the typed text (or leaves the chat when the prompt is empty); during a
-reply it stops that reply without leaving the chat (the partial reply stays in
-the conversation). Commands start with `/` (Tab completes them): `/help`, `/clear`,
-`/tools`, `/exit` (or `/quit`). Anything else is sent to the model.
-
-The UI degrades gracefully: with piped input/output or `TERM=dumb` it prints plain text
-(no spinner, panel or rule), on a non-UTF-8 terminal it swaps its symbols for ASCII, and
-`NO_COLOR` turns colors off. Failures name the likely fix (bad API key, rate limit,
-unreachable endpoint, timeout).
-
-Run the checks:
+Checks:
 
 ```sh
 uv run pytest -q
@@ -47,227 +42,301 @@ uv run ruff check .
 uv run mypy
 ```
 
+## Chat REPL
 
-## Basic Overview
+- Replies stream in as they are generated and render as Markdown.
+- Each tool call shows as a dim `⚙ name(args) → result` line.
+- A rule showing the elapsed time closes each turn.
 
-`Agent.run(user_input)` adds the prompt to a created long-running `Conversation`, then loops:
+| Key / command | Effect |
+|---|---|
+| ↑ / ↓, Ctrl-R | Input history (persisted in `$LIGHT_HARNESS_HOME/history`) |
+| Alt-Enter | Insert a newline |
+| Ctrl-C (while typing) | Clear the input; on an empty prompt, leave the chat |
+| Ctrl-C (during a reply) | Stop the reply; the partial reply stays in the conversation |
+| `/help`, `/clear`, `/tools`, `/exit` (`/quit`) | Commands (Tab completes them) |
 
-1. Send `system` + history to the model (along with tool schemas).
-2. If the model requests tool calls, run each tool, append the results, and loop.
+Anything that isn't a command is sent to the model.
+
+The output adapts to the terminal:
+
+- Piped input/output or `TERM=dumb`: plain text, without the spinner, panel or rule.
+- Non-UTF-8 terminal: ASCII symbols.
+- `NO_COLOR`: no colors.
+
+Error messages suggest the likely fix (bad API key, rate limit, unreachable
+endpoint, timeout).
+
+## How it works
+
+`Agent.run(user_input)` adds the prompt to a long-running `Conversation`, then loops:
+
+1. Send `system` + history (with tool schemas) to the model.
+2. If the model requests tool calls, run each one, append the results, and loop.
 3. If the model returns a plain message, append it and return it as the answer.
 
-The loop stops when the model stops calling tools or `max_steps` is reached.
-Tool errors are returned to the model as strings rather than raising, so the
-agent can recover.
-Each chat session is appended to a JSONL log under the active agent's persona
-directory (`personas/<name>/sessions/`), capturing the user prompts, assistant
-replies, tool calls, and tool results.
+The loop ends when the model stops calling tools or `max_steps` is reached.
+A tool error doesn't raise: it goes back to the model as a string, so the agent
+can recover.
+
+Each session is appended to a JSONL log at
+`personas/<name>/sessions/` in the harness home. The log records the user
+prompts, the assistant replies, and the tool calls and their results.
 
 ## Configuration
 
-Settings come from the config file, falling back to built-in defaults. There
-are no per-field environment overrides: each agent resolves its own provider,
-model, base URL and API key, so agents on different providers never share
-credentials. Secrets are pulled from the environment by interpolation (below).
+### Where settings come from
 
-- **Config file**: `$LIGHT_HARNESS_HOME/config.yaml` (default home
-  `$HOME/.light-harness/config.yaml`). See `config.yaml.example` for a template.
-- **Env var**: `LIGHT_HARNESS_HOME` overrides the config home directory.
-- **`.env`**: the CLI loads `./.env` and then `$LIGHT_HARNESS_HOME/.env`
-  (`KEY=VALUE` lines) at startup. Variables already set in the environment win
-  over both files, and `./.env` wins over the home file; `./.env` may itself set
-  `LIGHT_HARNESS_HOME`.
-- **Errors**: a config file that is not valid YAML (or whose top level is not a
-  mapping) aborts the command with an error. Individual malformed entries
-  (an agent without a name, a webhook without a `/` path, ...) are dropped and
-  reported as `Config warning:` lines on stderr.
-- **Env interpolation**: config values may use `$NAME` or `${NAME}`; set
-  variables are substituted, unset ones are left as-is -- except in credentials,
-  where that would be unsafe: a provider `api_key` that references an unset
-  variable is cleared (so `agent chat` reports "No API key"), and a webhook whose
-  `secret` references one is disabled. Each case prints a `Config warning:`.
+| Source | Notes |
+|---|---|
+| `$LIGHT_HARNESS_HOME/config.yaml` | Default home: `~/.light-harness`. Template: `config.yaml.example`. Missing settings use built-in defaults. |
+| `LIGHT_HARNESS_HOME` | Overrides the home directory. |
+| `.env` files | Loaded at startup: `./.env`, then `$LIGHT_HARNESS_HOME/.env` (`KEY=VALUE` lines). Precedence: real environment > `./.env` > home `.env`. `./.env` may set `LIGHT_HARNESS_HOME`. |
 
-The file is sectioned:
+There are no per-field environment overrides. Each agent resolves its own
+provider, model, base URL and API key, so agents on different providers never
+share credentials.
 
-- `providers:` — named endpoints. Each has `base_url`, `api_key`, `timeout`,
-  and a `models` list (the models you can switch among).
-- `agents:` — a list of named agents. Each picks a `provider` and `model`,
-  plus an optional `tools` list (opt-in: omit for every available built-in tool,
-  `[]` for none, or name a subset), an optional `workspace`, and an optional
-  `persona` (a key into `personas:`). The file tools (`read_file`, `write_file`,
-  `edit_file`) are only available to an agent with a `workspace`: an absolute
-  directory they are confined to. `../` traversal, absolute paths outside it, and
-  symlinks pointing out of it are refused, as are files with more than one hard
-  link (another name may sit outside the workspace), and a workspace that contains (or sits
-  inside) `LIGHT_HARNESS_HOME` is rejected because that holds `config.yaml` with
-  your keys. A bad workspace disables the file tools and prints a `Config warning`.
-  A `tools:` name that is not a built-in prints a `Config warning` and is ignored.
-  Writes are atomic and files over 10 MB are refused. Only regular files are
-  reachable: a FIFO, socket or device inside the workspace is refused, because
-  reading one would block the tool. Anything else *inside* the workspace is still
-  fair game, so keep it narrow and prefer `tools: [read_file]` for agents that
-  don't need to write.
-- **Forgejo tools** (`src/light_harness/tools/forgejo/`) are built in like the others:
-  available to every agent unless its `tools:` list names a subset. They call a
-  Forgejo instance named per call: `forgejo_pr` (PR details as JSON), `forgejo_pr_diff`
-  (diff text), `forgejo_pr_comment` (post a comment), `forgejo_pr_review` (approve /
-  request changes / comment, with optional inline comments on `path` +
-  `new_line`/`old_line`), `forgejo_pr_comment_edit` and `forgejo_pr_comment_delete` (both
-  by `comment_id`, which must belong to the named PR) and `forgejo_pr_review_delete` (by
-  `review_id`). `forgejo_pr_create` opens a PR (`title`, `head`, optional `base` --
-  default branch if omitted -- and `body`; set labels/assignees afterwards with
-  `forgejo_issue_update`), `forgejo_pr_close` closes one without merging, and
-  `forgejo_pr_merge` merges it (`method` merge/rebase/rebase-merge/squash/
-  fast-forward-only, optional `title`, `message`, `delete_branch`, `head_commit_id`).
-  The per-PR tools take a PR `url`
-  or `instance_url` + `repo` + `pr_number`, and an API `token` (required for everything
-  that writes or deletes). Issues: `forgejo_issue_create` (`title`, optional `body`,
-  `labels` by name, `assignees`), `forgejo_issue_list` (`state`, `labels`, `query`,
-  `limit`/`page`; short summaries), `forgejo_issue` (one issue, optionally with its
-  comments), `forgejo_issue_update` (title, body, `state` open/closed, and `assignees` /
-  `labels`, which replace the current ones), `forgejo_issue_comment`, and
-  `forgejo_issue_comment_edit` / `forgejo_issue_comment_delete` (by `comment_id`, which
-  must belong to the named issue). The repo-level
-  ones take a repo `url` or `instance_url` + `repo`; the per-issue ones an issue `url` or
-  `instance_url` + `repo` + `issue_number`. `forgejo_clone` runs `git clone` of a repo
-  (`url`, or `instance_url` + `repo`) into `path`, with optional `token`, `branch` and
-  `depth`; like the file tools it exists only for an agent with a `workspace`, and `path`
-  must resolve
-  inside it (the destination must be missing or empty). The token is passed to git as a
-  header, never written into the clone's `.git/config`. To keep an agent away from them,
-  give it a `tools:` list without them. (The earlier `extra_tools` /
-  `disable_extra_tools` keys are no longer read and print a warning.)
-- `personas:` — names a persona. Each named persona gets a directory under
-  `LIGHT_HARNESS_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
-  `sessions/` directory of conversation logs. The `SOUL.md` value seeds that file
-  on first creation only; from then on the file is the source of truth for the
-  system prompt of every agent that references the persona. Edit the prompt by
-  editing `personas/<name>/SOUL.md` -- or through `agent web`, whose persona
-  field reads and writes that file.
-- `interaction:` — names which agent each interaction uses; `chat.agent` is
-  the agent the `agent chat` loop runs.
-- `webhooks:` — names HTTP paths that trigger a specific agent. Each entry has a
-  `path`, an `agent` (a name under `agents:`), an optional `secret` that, when
-  set, requires `Authorization: Bearer <secret>`, and an optional `system_prompt`
-  that overrides the agent's default system prompt. Served by `agent webhooks`.
-- `webhook_server:` — tunes `agent webhooks`: `host`, `port`, extra
-  `allowed_hosts`, and `output_log` (when true, each accepted webhook call
-  logs itself and names its run's session log file on the server's stdout;
-  `--output-log` / `--no-output-log` override it).
+**Env interpolation.** Config values may use `$NAME` or `${NAME}`. Variables
+that are set get substituted; unset ones are left as-is, except in credentials:
 
-`Config.active_agent()` resolves the agent the loop uses (the one named by
-`interaction.chat.agent`, else the first agent, else a default), and
-`Config.endpoint()` resolves that into the effective endpoint.
-New features add their own section (see `Config` in `config.py`).
+- a provider `api_key` that references an unset variable is cleared, so
+  `agent chat` reports "No API key";
+- a webhook `secret` that references an unset variable disables that webhook.
+
+Both cases print a `Config warning:`.
+
+**Errors.** If the file isn't valid YAML, or its top level isn't a mapping, the
+command aborts. Malformed entries (an agent without a name, a webhook path that
+doesn't start with `/`, …) are dropped, and each prints a `Config warning:` line
+to stderr.
+
+### Sections
+
+| Section | Purpose |
+|---|---|
+| `providers:` | Named endpoints: `base_url`, `api_key`, `timeout`, and a `models` list. |
+| `agents:` | Named agents: `provider`, `model`, and the optional `tools`, `workspace` and `persona`. |
+| `personas:` | Named system prompts, each stored in its own directory (see below). |
+| `interaction:` | Which agent each interaction uses; `chat.agent` is the agent for `agent chat`. |
+| `webhooks:` | HTTP paths that trigger an agent: `path`, `agent`, plus the optional `secret` and `system_prompt`. |
+| `webhook_server:` | `host`, `port`, extra `allowed_hosts`, and `output_log`. |
+
+`Config.active_agent()` picks the agent the loop uses: `interaction.chat.agent`,
+else the first agent, else a default. `Config.endpoint()` turns that agent into
+the endpoint it calls. New features add their own section (see `Config` in
+`config.py`).
+
+### Agents
+
+- **`tools`** (opt-in): omit it to get every available built-in, set `[]` for
+  none, or list a subset. Unknown names print a `Config warning` and are ignored.
+  The old `extra_tools` / `disable_extra_tools` keys are no longer read and
+  print a warning.
+- **`workspace`**: an absolute directory. The file tools and `forgejo_clone`
+  are only available to agents that have one (see
+  [Workspace sandbox](#workspace-sandbox)).
+- **`persona`**: a key into `personas:`.
+
+### Personas
+
+Each persona gets a directory, `$LIGHT_HARNESS_HOME/personas/<name>/`, which holds:
+
+- `SOUL.md`: the system prompt for every agent that uses the persona. The
+  `SOUL.md` value in the config only seeds this file the first time it's
+  created. After that, the file is the source of truth: edit it directly or
+  through `agent web`.
+- `sessions/`: conversation logs.
+
+## Built-in tools
+
+### File tools
+
+`read_file`, `write_file`, `edit_file`. These are only available to an agent
+that has a `workspace`.
+
+#### Workspace sandbox
+
+The tools refuse:
+
+- paths outside the workspace: `../` traversal, outside absolute paths, and
+  symlinks that point out of it;
+- files with more than one hard link, since another name for the file may be
+  outside the workspace;
+- anything that isn't a regular file (FIFOs, sockets, devices), because
+  reading one would block the tool;
+- files over 10 MB.
+
+Writes are atomic. A workspace that contains, or is inside,
+`LIGHT_HARNESS_HOME` is rejected, because the home holds `config.yaml` with
+your keys. An invalid workspace disables the file tools and prints a
+`Config warning`.
+
+Everything else inside the workspace is reachable, so keep the workspace small.
+Agents that don't need to write should get `tools: [read_file]`.
+
+### Forgejo tools
+
+These live in `src/light_harness/tools/forgejo/` and are available to every
+agent unless its `tools:` list leaves them out. Each call names the Forgejo
+instance to talk to. Tools that write or delete need an API `token`.
+
+How to address the target:
+
+- **PR tools**: a PR `url`, or `instance_url` + `repo` + `pr_number`.
+- **Issue tools**: an issue `url`, or `instance_url` + `repo` + `issue_number`.
+- **Repo-level tools**: a repo `url`, or `instance_url` + `repo`.
+
+**Pull requests**
+
+| Tool | Does |
+|---|---|
+| `forgejo_pr` | PR details as JSON |
+| `forgejo_pr_diff` | Diff text |
+| `forgejo_pr_create` | Open a PR: `title`, `head`, plus optional `base` (default branch if omitted) and `body` |
+| `forgejo_pr_close` | Close without merging |
+| `forgejo_pr_merge` | Merge. `method`: merge / rebase / rebase-merge / squash / fast-forward-only. Optional: `title`, `message`, `delete_branch`, `head_commit_id` |
+| `forgejo_pr_comment` | Post a comment |
+| `forgejo_pr_comment_edit` / `_delete` | Edit or delete a comment by `comment_id` (the comment must belong to that PR) |
+| `forgejo_pr_review` | Approve, request changes, or comment. Optional inline comments on `path` + `new_line`/`old_line` |
+| `forgejo_pr_review_delete` | Delete a review by `review_id` |
+
+To set labels or assignees on a PR, use `forgejo_issue_update`.
+
+**Issues**
+
+| Tool | Does |
+|---|---|
+| `forgejo_issue_create` | Create: `title`, plus optional `body`, `labels` (by name) and `assignees` |
+| `forgejo_issue_list` | Short summaries; filter by `state`, `labels`, `query`; paginate with `limit`/`page` |
+| `forgejo_issue` | One issue, optionally with its comments |
+| `forgejo_issue_update` | Title, body, `state` (open/closed). `assignees` and `labels` replace the current ones |
+| `forgejo_issue_comment` | Post a comment |
+| `forgejo_issue_comment_edit` / `_delete` | Edit or delete a comment by `comment_id` (the comment must belong to that issue) |
+
+**Clone**
+
+`forgejo_clone` runs `git clone` of a repo into `path`. Optional arguments:
+`token`, `branch`, `depth`.
+
+- Like the file tools, it is only available to agents with a `workspace`.
+- `path` must resolve inside the workspace and must be missing or empty.
+- The token goes to git as a header and is never written to the clone's
+  `.git/config`.
 
 ## Web config UI
 
-`--webui` on `agent chat` or `agent webhooks` also serves a small local web page
-for viewing and editing the config file (no extra dependencies; binds to
-`127.0.0.1` by default):
+`agent web` serves a local page for viewing and editing the config. You can
+also add `--webui` to `agent chat` or `agent webhooks` to serve it alongside
+them. It needs no extra dependencies and binds to `127.0.0.1` by default.
 
 ```sh
-uv run agent chat --webui                      # http://127.0.0.1:8765/
-uv run agent webhooks --webui --webui-port 9000  # custom port
+uv run agent chat --webui                           # http://127.0.0.1:8765/
+uv run agent webhooks --webui --webui-port 9000     # custom port
 uv run agent webhooks --webui --webui-host 0.0.0.0  # expose beyond localhost
 ```
 
-The page has a navigation sidebar with **Providers**, **Agents**, **Personas**,
-**Chat** and **Webhooks** pages, and a top bar showing the config file path with
-**Save** and **Refresh** buttons to the right (they apply to every page).
-Providers (each with base URL, API key, timeout, and an add/remove
-able list of models), agents (each with name, provider, model, opt-in tools, and
-persona), personas (each with its `SOUL.md`: the field shows the persona's stored
-`personas/<name>/SOUL.md` -- the prompt the agent actually uses -- and saving it
-rewrites that file; any other file a persona has is kept as it is), the
-chat page (which agent the chat loop uses), and webhooks (path, agent, optional
-secret and system prompt) are edited via form fields. Edits
-write back to `config.yaml` (env refs like `$NAME` / `${NAME}` are preserved), and
-on-disk changes are reflected automatically. Only
-the sections a request actually names are rewritten: a request that names none
-of them is refused, so no save can drop the sections it never touched. A running
-`agent chat` session is unaffected -- changes apply to the next session.
+The sidebar has pages for **Providers**, **Agents**, **Personas**, **Chat** and
+**Webhooks**. The top bar shows the config path, with **Save** and **Refresh**
+buttons that apply to every page.
 
-**Access control.** The config holds API keys and webhook secrets, so the API is
-not open to arbitrary web pages even though CORS defaults to `*`:
+- Saving writes back to `config.yaml` and keeps env refs (`$NAME`, `${NAME}`)
+  as written. Changes made on disk show up in the page automatically.
+- The persona field edits `personas/<name>/SOUL.md` directly. Other files in
+  the persona's directory are left alone.
+- A save only rewrites the sections it names, and a request that names none is
+  refused. A save can't drop sections it didn't touch.
+- A running `agent chat` session keeps its old config; changes apply to the
+  next session.
 
-- Every `/api/*` request needs the per-launch token in an `X-Agent-Token` header.
-  The token is embedded in the served page (which is sent with `Cache-Control:
-  no-store` and no CORS headers, so other sites cannot read it) and printed at
-  startup for scripts. It changes on every launch. Every `/api/*` answer -- which
-  carries the config's API keys and webhook secrets -- is sent with `Cache-Control:
-  no-store` as well, so nothing in between can keep a copy.
-- The `Host` header must name this server: `localhost` or any `*.localhost`,
+### Access control
+
+The config holds API keys and webhook secrets, so the API is locked down even
+though CORS defaults to `*`:
+
+- **Token.** Every `/api/*` request needs the per-launch token in an
+  `X-Agent-Token` header. The token is embedded in the page, which is served
+  with no CORS headers so other sites can't read it. It is also printed at
+  startup for scripts, and it changes on every launch. The page and all
+  `/api/*` responses are sent with `Cache-Control: no-store`, so caches in
+  between don't keep copies.
+- **Host check.** The `Host` header must be `localhost` / `*.localhost`,
   `127.0.0.1`, `::1`, the bind host, an IP address, or a name passed with
-  `--allowed-host` (repeat it for each name the server is reached by -- a mDNS
-  name, the name a reverse proxy forwards). This blocks DNS rebinding, and it
-  applies to a `0.0.0.0` / `::` bind too: that is the bind a browser can be talked
-  into reaching under a hostname an attacker controls.
-- `Access-Control-Allow-Origin` on `/api/*` is `*` by default; set
-  `--cors-origin https://ui.example` to restrict it, or `--cors-origin ""` to
-  disable CORS. The value must be `*` or a bare origin (`https://host[:port]`: no
-  path, no `user:pass@`, no whitespace) because it is echoed into a response
-  header verbatim -- anything else is refused at startup instead of becoming an
-  extra header on every `/api/*` response. Note that with `*` the token is the
-  only thing protecting the API: anyone who obtains it (e.g. from the startup
-  output) can call it from any origin.
+  `--allowed-host` (repeat the flag for each name, e.g. an mDNS name or the name
+  a reverse proxy forwards). This blocks DNS rebinding, and it applies to
+  `0.0.0.0` / `::` binds too.
+- **CORS.** `Access-Control-Allow-Origin` on `/api/*` defaults to `*`.
+  `--cors-origin https://ui.example` restricts it; `--cors-origin ""` disables
+  it. The value must be `*` or a bare origin (`https://host[:port]`: no path,
+  no `user:pass@`, no whitespace), and anything else is refused at startup.
+  With `*`, the token is the only protection: anyone who has it (e.g. from the
+  startup output) can call the API from any origin.
 
 ## Webhook listeners
 
-`agent webhooks` serves the webhooks named in the `webhooks:` config section on a
-local HTTP server (no extra dependencies; binds to `127.0.0.1:8787` by default).
-Each POST to a configured `path` runs that webhook's `agent` with the parsed
-request body (JSON is re-serialized; non-JSON is passed through as text). The
-server acknowledges immediately with `200 {"agent": ..., "message": "OK"}` once
-the agent has been built, and runs it in the background: the agent's answer is
-not returned to the caller (a failed run is only printed to stderr), and a run
-that cannot start gets a 500. Concurrent runs are capped; POSTs over the cap
-get 429. A webhook with a `secret` requires the request to
-carry `Authorization: Bearer <secret>`; others are unauthenticated.
-
-Every request must also carry a `Host` header that names the server -- a loopback
-name, an IP address, the bind host, or a name passed with `--allowed-host` (the
-name a reverse proxy forwards). A request under any other hostname gets 403 and
-no agent is run for it.
-
-A webhook may carry an optional `system_prompt`, which overrides the agent's
-default (persona-based) system prompt for that webhook's runs.
-
-With `--output-log` (or `output_log: true` under `webhook_server:`), the server
-logs each webhook call whose run started -- time, path, agent, and the session
-log file that will hold that run's chat log (relative to the harness home, so
-`personas/<persona>/sessions/<file>.jsonl`). `--no-output-log` turns it back
-off. Rejected requests (401, 403, 404, 429) and calls whose agent cannot start
-(500) log nothing.
-
-At startup the server prints warnings on stderr naming the webhooks that cannot work as
-configured: the unauthenticated ones, and any webhook whose agent cannot get the tools its
-config implies -- an omitted `tools` list means every built-in, so a webhook whose agent has
-no `workspace` loses `read_file`, `write_file` and `edit_file`, and a webhook naming an agent
-that does not exist cannot run at all.
+`agent webhooks` serves the `webhooks:` section on a local HTTP server. It needs
+no extra dependencies and binds to `127.0.0.1:8787` by default.
 
 ```sh
-uv run agent webhooks                # http://127.0.0.1:8787/
-uv run agent webhooks --port 9001    # custom port
-uv run agent webhooks --host 0.0.0.0 # expose beyond localhost
-uv run agent webhooks --allowed-host hooks.example # behind a proxy at that name
-uv run agent webhooks --output-log # log each call and its session log file
+uv run agent webhooks                               # http://127.0.0.1:8787/
+uv run agent webhooks --port 9001                   # custom port
+uv run agent webhooks --host 0.0.0.0                # expose beyond localhost
+uv run agent webhooks --allowed-host hooks.example  # behind a proxy at that name
+uv run agent webhooks --output-log                  # log each call and its session log file
 ```
+
+A POST to a configured `path` runs that webhook's `agent` with the request body.
+JSON bodies are re-serialized; anything else is passed through as text. The
+webhook's `system_prompt`, if set, replaces the agent's persona prompt for these
+runs.
+
+| Response | When |
+|---|---|
+| `200 {"agent": ..., "message": "OK"}` | The agent was built. It runs in the background; its answer isn't returned, and a failed run is only printed to stderr |
+| 401 | Missing or wrong `Authorization: Bearer <secret>` (only for webhooks with a `secret`) |
+| 403 | `Host` isn't a loopback name, an IP address, the bind host, or an `--allowed-host` |
+| 404 | No webhook configured at that path |
+| 429 | Too many concurrent runs |
+| 500 | The run couldn't start |
+
+Webhooks without a `secret` are unauthenticated.
+
+**Output log.** `--output-log` (or `output_log: true` under `webhook_server:`)
+prints a line for each call whose run started: time, path, agent, and the
+session log file for that run (relative to the home, e.g.
+`personas/<persona>/sessions/<file>.jsonl`). Rejected requests and 500s are
+not logged. `--no-output-log` overrides the config.
+
+**Startup warnings** go to stderr for:
+
+- unauthenticated webhooks;
+- webhooks whose agent can't get the tools its config implies. An omitted
+  `tools` list means every built-in, so an agent without a `workspace` loses
+  the file tools;
+- webhooks that name an agent that doesn't exist. These can't run at all.
 
 ## Extending it
 
-- **Add a tool**: implement `name` / `description` / `parameters` (JSON Schema)
-  / `async run(arguments: dict[str, Any]) -> str` (the arguments arrive as one
-  dict), then `registry.register(MyTool())`. Before `run` is called, the registry
-  checks the arguments against `parameters` (required keys and scalar types) and
-  returns a descriptive error to the model on a mismatch; each call is also limited
-  to 60 seconds -- but a timeout can only fire while the event loop is free, so a
-  tool whose `run` blocks the loop synchronously cannot be interrupted: hand
-  blocking work (disk, sockets) to a thread with `asyncio.to_thread`, as the
-  built-in file tools do. A timed-out call is abandoned, not killed: its worker
-  thread runs to completion in the background. Tools registered this way are used
-  programmatically -- the `tools:` config list only selects among the built-ins.
-- **Use a different model**: implement the `LLMClient` protocol
-  (`async chat(...) -> LLMResponse`, `async close()`) and pass it to `Agent`.
-  The default client talks to any OpenAI-compatible endpoint; set it per
-  provider with `base_url` in `config.yaml`.
+### Add a tool
+
+Implement `name`, `description`, `parameters` (JSON Schema) and
+`async run(arguments: dict[str, Any]) -> str`, then call
+`registry.register(MyTool())`.
+
+- Before `run` is called, the registry checks the arguments against
+  `parameters` (required keys and scalar types). On a mismatch, the model gets
+  a descriptive error.
+- Each call has a 60-second limit, but the timeout can only fire while the
+  event loop is free. Run blocking work (disk, sockets) in a thread with
+  `asyncio.to_thread`, as the built-in file tools do. A call that times out is
+  abandoned, not killed: its worker thread keeps running in the background
+  until it finishes.
+- Tools registered this way are for programmatic use only. The `tools:` config
+  list only chooses among the built-ins.
+
+### Use a different model
+
+Implement the `LLMClient` protocol (`async chat(...) -> LLMResponse`,
+`async close()`) and pass it to `Agent`. The default client works with any
+OpenAI-compatible endpoint; set the endpoint per provider with `base_url` in
+`config.yaml`.
