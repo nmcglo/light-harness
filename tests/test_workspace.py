@@ -216,7 +216,7 @@ def test_config_fails_closed_on_bad_workspace(
               - {{name: missing, workspace: {tmp_path}/nope}}
               - {{name: wide, workspace: {tmp_path}}}
               - {{name: inside, workspace: {home}}}
-              - {{name: nows, tools: [read_file, echo]}}
+              - {{name: nows, tools: [read_file, current_time]}}
             """
         )
     )

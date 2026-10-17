@@ -25,7 +25,7 @@ agents:
   - name: a
     provider: local
     model: m
-    tools: [echo]
+    tools: [current_time]
 interaction:
   chat:
     agent: a
@@ -53,8 +53,8 @@ def test_tools_lists_the_configured_agents_tools(home: Path) -> None:
     result = runner.invoke(cli.app, ["tools"])
 
     assert result.exit_code == 0, result.output
-    assert "echo" in result.output
-    assert "current_time" not in result.output
+    assert "current_time" in result.output
+    assert "read_file" not in result.output
 
 
 def test_broken_config_aborts_with_an_error(home: Path) -> None:

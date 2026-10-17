@@ -7,7 +7,8 @@ import contextlib
 
 from light_harness.agent import Agent
 from light_harness.llm import ChatMessage, LLMResponse, ToolCall
-from light_harness.tools import default_registry
+
+from ._helpers import sample_registry
 
 
 class FakeClient:
@@ -38,7 +39,7 @@ class FakeClient:
 
 
 def test_agent_calls_tool_then_returns_answer() -> None:
-    agent = Agent(client=FakeClient(), tools=default_registry())
+    agent = Agent(client=FakeClient(), tools=sample_registry())
     answer = asyncio.run(agent.run("What is 2 + 3?"))
 
     assert answer == "The sum is 5."
@@ -58,7 +59,7 @@ def test_agent_stops_at_step_budget() -> None:
         async def close(self) -> None:
             return None
 
-    agent = Agent(client=AlwaysCalls(), tools=default_registry(), max_steps=3)
+    agent = Agent(client=AlwaysCalls(), tools=sample_registry(), max_steps=3)
     answer = asyncio.run(agent.run("keep going"))
     assert answer.startswith("Stopped")
 
@@ -84,7 +85,7 @@ def test_tool_call_times_out_and_reports_error() -> None:
 
 
 def test_registry_validates_arguments_before_running() -> None:
-    registry = default_registry()
+    registry = sample_registry()
 
     async def run(name: str, args: dict) -> str:
         return await registry.run(name, args)
@@ -140,7 +141,7 @@ def test_malformed_tool_arguments_reach_the_model_instead_of_crashing() -> None:
         return httpx.Response(200, json=_completion({"content": "recovered"}))
 
     client, http = _mock_client(handler)
-    agent = Agent(client=client, tools=default_registry())
+    agent = Agent(client=client, tools=sample_registry())
     try:
         assert asyncio.run(agent.run("add please")) == "recovered"
     finally:
@@ -463,7 +464,7 @@ def test_agent_reports_each_tool_call_result() -> None:
     from light_harness.agent import Agent
 
     seen: list[tuple[str, dict, str]] = []
-    agent = Agent(FakeClient(), default_registry())
+    agent = Agent(FakeClient(), sample_registry())
     asyncio.run(agent.run("add", on_tool=lambda n, a, r: seen.append((n, a, r))))
 
     assert seen == [("add", {"a": 2, "b": 3}, seen[0][2])]

@@ -260,7 +260,7 @@ def test_tool_availability_warning_is_quiet_when_nothing_implied_is_lost() -> No
         WebhookConfig(path="/b", agent="explicit"),
         agents=[
             AgentConfig(name="with_ws", workspace="/tmp/ws"),
-            AgentConfig(name="explicit", tools=["echo"]),
+            AgentConfig(name="explicit", tools=["current_time"]),
         ],
     )
     assert tool_availability_warning(config) is None
@@ -532,7 +532,7 @@ def _real_factory_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspa
         "    provider: local\n"
         "    model: m\n"
         "    persona: p1\n"
-        "    tools: [echo, read_file]\n"
+        "    tools: [current_time, read_file]\n"
         + (f"    workspace: {workspace}\n" if workspace else "")
         + "webhooks:\n"
         "  - path: /hooks/a\n"
@@ -602,7 +602,7 @@ def test_default_factory_wires_the_workspace_into_the_file_tools(
 
     agent = default_agent_factory(config, agent_cfg, hooks["/hooks/a"])
     try:
-        assert agent.tools.names() == ["echo", "read_file"]
+        assert agent.tools.names() == ["current_time", "read_file"]
         assert asyncio.run(agent.tools.run("read_file", {"path": "hello.txt"})) == (
             "from the workspace"
         )

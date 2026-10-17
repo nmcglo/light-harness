@@ -143,17 +143,24 @@ def test_load_yaml_missing_returns_empty(tmp_path: Path) -> None:
     assert load_yaml(tmp_path / "nope.yaml") == {}
 
 
-def test_build_registry_default_excludes_file_tools_without_workspace(tmp_path: Path) -> None:
-    assert set(build_tool_registry(None).names()) == {"echo", "current_time", "add"}
+def test_build_registry_default_excludes_workspace_tools_without_workspace(
+    tmp_path: Path,
+) -> None:
+    without_ws = set(build_tool_registry(None).names())
+    assert "current_time" in without_ws and "forgejo_pr" in without_ws
+    assert not without_ws & {"read_file", "write_file", "edit_file", "forgejo_clone"}
     with_ws = set(build_tool_registry(None, tmp_path).names())
-    assert with_ws == {"echo", "current_time", "add", "read_file", "write_file", "edit_file"}
-    # Naming a file tool without a workspace does not enable it.
-    assert build_tool_registry(["read_file", "echo"]).names() == ["echo"]
+    assert with_ws - without_ws == {"read_file", "write_file", "edit_file", "forgejo_clone"}
+    # Naming a workspace tool without a workspace does not enable it.
+    assert build_tool_registry(["read_file", "current_time"]).names() == ["current_time"]
     assert build_tool_registry(["read_file"], tmp_path).names() == ["read_file"]
 
 
 def test_build_registry_subset() -> None:
-    assert set(build_tool_registry(["echo", "add"]).names()) == {"echo", "add"}
+    assert set(build_tool_registry(["current_time", "read_file"], Path("/tmp")).names()) == {
+        "current_time",
+        "read_file",
+    }
 
 
 def test_build_registry_empty() -> None:
@@ -161,18 +168,19 @@ def test_build_registry_empty() -> None:
 
 
 def test_build_registry_ignores_unknown() -> None:
-    assert build_tool_registry(["echo", "bogus"]).names() == ["echo"]
+    assert build_tool_registry(["current_time", "bogus"]).names() == ["current_time"]
 
 
 def test_agent_tools_opt_in_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_cfg(
         tmp_path,
-        "agents:\n  - name: a\n    model: m\n    tools:\n      - echo\n      - add\n",
+        "agents:\n  - name: a\n    model: m\n    tools:\n      - current_time\n      - read_file\n",
     )
     monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     cfg = Config.load()
-    assert cfg.active_agent().tools == ["echo", "add"]
-    assert set(build_tool_registry(cfg.active_agent().tools).names()) == {"echo", "add"}
+    assert cfg.active_agent().tools == ["current_time", "read_file"]
+    names = build_tool_registry(cfg.active_agent().tools, tmp_path).names()
+    assert set(names) == {"current_time", "read_file"}
 
 
 def test_agent_tools_default_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,12 +264,40 @@ def test_webhook_with_unset_secret_variable_is_disabled(
 
 
 def test_unknown_tool_names_are_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_cfg(tmp_path, "agents:\n  - name: a\n    tools: [echo, no_such_tool]\n")
+    _write_cfg(tmp_path, "agents:\n  - name: a\n    tools: [current_time, no_such_tool]\n")
     monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
     config = Config.load()
     joined = "\n".join(config.warnings)
     assert "unknown tool(s) no_such_tool" in joined
-    assert build_tool_registry(config.agents[0].tools).names() == ["echo"]
+    assert build_tool_registry(config.agents[0].tools).names() == ["current_time"]
+
+
+def test_forgejo_tools_are_built_in_and_need_a_workspace_only_for_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    agent = "agents:\n  - name: a\n    tools: [current_time, forgejo_pr, forgejo_clone]\n"
+    _write_cfg(tmp_path, agent)
+    config = Config.load()
+    joined = "\n".join(config.warnings)
+    assert "forgejo_clone need a 'workspace'" in joined
+    assert "unknown tool" not in joined and "forgejo_pr," not in joined
+    names = build_tool_registry(config.agents[0].tools).names()
+    assert names == ["current_time", "forgejo_pr"]
+    # With a workspace the clone tool is there too.
+    names = build_tool_registry(config.agents[0].tools, tmp_path).names()
+    assert names == ["current_time", "forgejo_pr", "forgejo_clone"]
+
+
+@pytest.mark.parametrize("legacy", ["extra_tools", "disable_extra_tools"])
+def test_the_removed_extra_tools_keys_are_reported_and_have_no_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: str
+) -> None:
+    monkeypatch.setenv("LIGHT_HARNESS_HOME", str(tmp_path))
+    _write_cfg(tmp_path, f"{legacy}: true\nagents:\n  - name: a\n")
+    config = Config.load()
+    assert f"{legacy}: no longer used" in "\n".join(config.warnings)
+    assert "forgejo_pr" in build_tool_registry(config.agents[0].tools).names()
 
 
 def test_file_env_value_in_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

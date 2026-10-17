@@ -54,7 +54,7 @@ from .httputil import (
 from .llm import OpenAICompatibleClient
 from .sessions import SessionLog
 from .tools import build_tool_registry
-from .tools.builtin import BUILTIN_TOOL_NAMES, FILE_TOOL_NAMES
+from .tools.builtin import BUILTIN_TOOL_NAMES, WORKSPACE_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -336,8 +336,8 @@ def tool_availability_warning(config: Config) -> str | None:
     or ``None``.
 
     An agent with no ``tools`` list means "every available built-in tool", and the
-    file tools exist only with a workspace: a webhook whose agent has none runs with
-    just ``echo``, ``current_time``, ``add``. Tool names spelled out in ``tools`` are
+    workspace tools (the file tools and ``forgejo_clone``) exist only with a workspace:
+    a webhook whose agent has none runs without them. Tool names spelled out in ``tools`` are
     already reported by the config loader, so this covers the implied set, plus
     webhook entries naming an agent that does not exist.
     """
@@ -347,7 +347,7 @@ def tool_availability_warning(config: Config) -> str | None:
         if agent is None:
             lines.append(f"{webhook.path}: agent '{webhook.agent}' is not defined")
         elif agent.tools is None and agent.workspace is None:
-            implied = [t for t in BUILTIN_TOOL_NAMES if t in FILE_TOOL_NAMES]
+            implied = [t for t in BUILTIN_TOOL_NAMES if t in WORKSPACE_TOOL_NAMES]
             lines.append(
                 f"{webhook.path} (agent '{agent.name}'): no 'workspace', so "
                 f"{', '.join(implied)} are unavailable"

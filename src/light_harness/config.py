@@ -319,9 +319,9 @@ def _workspace_problem(raw: str) -> tuple[str | None, Path | None]:
 
 def _check_agent_tools(agent: AgentConfig, where: str, warnings: list[str]) -> AgentConfig:
     """Validate ``agent.workspace`` (failing closed: a bad one is dropped, which
-    disables the file tools) and flag tools the config asks for but cannot get:
-    file tools with no workspace, and names that are not built in."""
-    from .tools.builtin import BUILTIN_TOOL_NAMES, FILE_TOOL_NAMES  # lazy: tools imports config
+    disables the workspace tools) and flag tools the config asks for but cannot get:
+    workspace tools with no workspace, and names that are not built in."""
+    from .tools.builtin import BUILTIN_TOOL_NAMES, WORKSPACE_TOOL_NAMES  # lazy import
 
     if agent.workspace is not None:
         problem, resolved = _workspace_problem(agent.workspace)
@@ -334,7 +334,7 @@ def _check_agent_tools(agent: AgentConfig, where: str, warnings: list[str]) -> A
         else:
             agent = agent.model_copy(update={"workspace": str(resolved)})
     if agent.workspace is None:
-        wanted = [t for t in agent.tools or [] if t in FILE_TOOL_NAMES]
+        wanted = [t for t in agent.tools or [] if t in WORKSPACE_TOOL_NAMES]
         if wanted:
             warnings.append(
                 f"{where} ({agent.name}): {', '.join(wanted)} need a 'workspace' and "
@@ -649,6 +649,12 @@ class Config:
         raw = _resolve_env_in_value(load_yaml(config_file_path()))
         warnings: list[str] = []
         providers = _parse_providers(raw.get("providers"), warnings)
+        for legacy in ("extra_tools", "disable_extra_tools"):
+            if legacy in raw:
+                warnings.append(
+                    f"{legacy}: no longer used; every agent gets all tools unless its "
+                    "'tools:' list names a subset"
+                )
         agents = _parse_agents(raw.get("agents"), warnings)
         personas = _parse_personas(raw.get("personas"), warnings)
         interaction = _parse_interaction(raw.get("interaction"), warnings)

@@ -1,10 +1,10 @@
 """Built-in tools.
 
-``echo``, ``current_time`` and ``add`` are trivial examples of the :class:`Tool`
-interface. ``read_file``, ``write_file`` and ``edit_file`` do real work on disk and
-are confined to an agent's workspace directory (see :mod:`.workspace`); they exist
-only when a workspace is configured. Add your own tools the same way and register
-them in a :class:`ToolRegistry`.
+``current_time`` is a trivial example of the :class:`Tool` interface. ``read_file``,
+``write_file`` and ``edit_file`` do real work on disk and are confined to an agent's
+workspace directory (see :mod:`.workspace`); they exist only when a workspace is
+configured. The Forgejo tools (:mod:`.forgejo`) are built in too. Add your own tools
+the same way and register them in a :class:`ToolRegistry`.
 
 Their disk work runs in a worker thread (``asyncio.to_thread``) so a slow or
 stalled file cannot block the event loop or outrun the registry's timeout.
@@ -29,25 +29,11 @@ from .edit_diff import (
     restore_line_endings,
     split_bom,
 )
+from .forgejo import FORGEJO_TOOL_NAMES, FORGEJO_WORKSPACE_TOOL_NAMES, forgejo_tools
 from .workspace import Workspace, WorkspaceError, atomic_write_bytes, file_lock
 
 if TYPE_CHECKING:
     from . import ToolRegistry
-
-
-class EchoTool:
-    """Return the provided text unchanged."""
-
-    name = "echo"
-    description = "Return the provided text unchanged."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {"text": {"type": "string"}},
-        "required": ["text"],
-    }
-
-    async def run(self, arguments: dict[str, Any]) -> str:
-        return str(arguments["text"])
 
 
 class CurrentTimeTool:
@@ -59,21 +45,6 @@ class CurrentTimeTool:
 
     async def run(self, arguments: dict[str, Any]) -> str:
         return datetime.now(UTC).isoformat()
-
-
-class AddTool:
-    """Add two numbers and return their sum."""
-
-    name = "add"
-    description = "Add two numbers and return their sum."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-        "required": ["a", "b"],
-    }
-
-    async def run(self, arguments: dict[str, Any]) -> str:
-        return str(arguments["a"] + arguments["b"])
 
 
 _READ_MAX_LINES = 2000
@@ -442,17 +413,18 @@ class EditFileTool:
         return f"Successfully replaced {len(edits)} block(s) in {path}.\n{diff}"
 
 
-BUILTIN_TOOL_NAMES: tuple[str, ...] = (
-    EchoTool.name,
+CORE_TOOL_NAMES: tuple[str, ...] = (
     CurrentTimeTool.name,
-    AddTool.name,
     ReadFileTool.name,
     WriteFileTool.name,
     EditFileTool.name,
 )
+BUILTIN_TOOL_NAMES: tuple[str, ...] = CORE_TOOL_NAMES + FORGEJO_TOOL_NAMES
 FILE_TOOL_NAMES: frozenset[str] = frozenset(
     {ReadFileTool.name, WriteFileTool.name, EditFileTool.name}
 )
+# Every tool that exists only for an agent with a workspace.
+WORKSPACE_TOOL_NAMES: frozenset[str] = FILE_TOOL_NAMES | FORGEJO_WORKSPACE_TOOL_NAMES
 
 
 def make_workspace(root: Path) -> Workspace:
@@ -464,14 +436,14 @@ def make_workspace(root: Path) -> Workspace:
 def builtin_tools(workspace: Path | None = None) -> list[Tool]:
     """The built-in tools, in registration order.
 
-    The file tools exist only when ``workspace`` is given: without a root to
-    confine them to they would have the whole filesystem.
+    The file tools and ``forgejo_clone`` exist only when ``workspace`` is given:
+    without a root to confine them to they would have the whole filesystem.
     """
-    tools: list[Tool] = [EchoTool(), CurrentTimeTool(), AddTool()]
-    if workspace is not None:
-        ws = make_workspace(workspace)
+    tools: list[Tool] = [CurrentTimeTool()]
+    ws = make_workspace(workspace) if workspace is not None else None
+    if ws is not None:
         tools += [ReadFileTool(ws), WriteFileTool(ws), EditFileTool(ws)]
-    return tools
+    return tools + forgejo_tools(ws)
 
 
 def default_registry(workspace: Path | None = None) -> ToolRegistry:
@@ -489,9 +461,9 @@ def build_tool_registry(
 ) -> ToolRegistry:
     """Build a registry from an opt-in tool selection.
 
-    ``None`` selects every built-in tool available (the file tools only when a
+    ``None`` selects every built-in tool available (the workspace tools only when a
     ``workspace`` is given); a list selects only the named ones (unknown names, and
-    file tools without a workspace, are ignored); an empty list yields no tools.
+    workspace tools without a workspace, are ignored); an empty list yields no tools.
     """
     from . import ToolRegistry  # local import avoids a circular import at load
 

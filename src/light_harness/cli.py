@@ -157,7 +157,8 @@ def chat(
 @app.command()
 def tools() -> None:
     """List the tools the agent will use (per the current config)."""
-    active = _load_config().active_agent()
+    config = _load_config()
+    active = config.active_agent()
     registry = build_tool_registry(active.tools, active.workspace_path())
     for spec in registry.tool_schemas():
         fn = spec["function"]

@@ -107,6 +107,36 @@ The file is sectioned:
   reading one would block the tool. Anything else *inside* the workspace is still
   fair game, so keep it narrow and prefer `tools: [read_file]` for agents that
   don't need to write.
+- **Forgejo tools** (`src/light_harness/tools/forgejo/`) are built in like the others:
+  available to every agent unless its `tools:` list names a subset. They call a
+  Forgejo instance named per call: `forgejo_pr` (PR details as JSON), `forgejo_pr_diff`
+  (diff text), `forgejo_pr_comment` (post a comment), `forgejo_pr_review` (approve /
+  request changes / comment, with optional inline comments on `path` +
+  `new_line`/`old_line`), `forgejo_pr_comment_edit` and `forgejo_pr_comment_delete` (both
+  by `comment_id`, which must belong to the named PR) and `forgejo_pr_review_delete` (by
+  `review_id`). `forgejo_pr_create` opens a PR (`title`, `head`, optional `base` --
+  default branch if omitted -- and `body`; set labels/assignees afterwards with
+  `forgejo_issue_update`), `forgejo_pr_close` closes one without merging, and
+  `forgejo_pr_merge` merges it (`method` merge/rebase/rebase-merge/squash/
+  fast-forward-only, optional `title`, `message`, `delete_branch`, `head_commit_id`).
+  The per-PR tools take a PR `url`
+  or `instance_url` + `repo` + `pr_number`, and an API `token` (required for everything
+  that writes or deletes). Issues: `forgejo_issue_create` (`title`, optional `body`,
+  `labels` by name, `assignees`), `forgejo_issue_list` (`state`, `labels`, `query`,
+  `limit`/`page`; short summaries), `forgejo_issue` (one issue, optionally with its
+  comments), `forgejo_issue_update` (title, body, `state` open/closed, and `assignees` /
+  `labels`, which replace the current ones), `forgejo_issue_comment`, and
+  `forgejo_issue_comment_edit` / `forgejo_issue_comment_delete` (by `comment_id`, which
+  must belong to the named issue). The repo-level
+  ones take a repo `url` or `instance_url` + `repo`; the per-issue ones an issue `url` or
+  `instance_url` + `repo` + `issue_number`. `forgejo_clone` runs `git clone` of a repo
+  (`url`, or `instance_url` + `repo`) into `path`, with optional `token`, `branch` and
+  `depth`; like the file tools it exists only for an agent with a `workspace`, and `path`
+  must resolve
+  inside it (the destination must be missing or empty). The token is passed to git as a
+  header, never written into the clone's `.git/config`. To keep an agent away from them,
+  give it a `tools:` list without them. (The earlier `extra_tools` /
+  `disable_extra_tools` keys are no longer read and print a warning.)
 - `personas:` — names a persona. Each named persona gets a directory under
   `LIGHT_HARNESS_HOME` -- `personas/<name>/` -- holding its `SOUL.md` plus a
   `sessions/` directory of conversation logs. The `SOUL.md` value seeds that file

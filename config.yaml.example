@@ -49,13 +49,18 @@ agents:
   - name: assistant
     provider: local
     model: qwen3.8:27b
-    # Optional opt-in list of built-in tools (echo, current_time, add, and the file
-    # tools read_file/write_file/edit_file). Omit for all available; [] for none.
-    # The file tools need a `workspace` (absolute directory); without one they are
-    # unavailable even if listed. Everything the agent writes stays inside it.
+    # Optional opt-in list of built-in tools: current_time, the file tools
+    # read_file/write_file/edit_file, and the Forgejo tools (forgejo_pr, forgejo_pr_diff,
+    # forgejo_pr_comment, forgejo_pr_comment_edit, forgejo_pr_comment_delete,
+    # forgejo_pr_review, forgejo_pr_review_delete, forgejo_pr_create, forgejo_pr_close,
+    # forgejo_pr_merge, forgejo_issue_create, forgejo_issue_list, forgejo_issue,
+    # forgejo_issue_update, forgejo_issue_comment, forgejo_issue_comment_edit,
+    # forgejo_issue_comment_delete, forgejo_clone). Omit for
+    # all available; [] for none.
+    # The file tools and forgejo_clone need a `workspace` (absolute directory); without
+    # one they are unavailable even if listed. Everything the agent writes stays inside it.
     tools:
-      - echo
-      - add
+      - current_time
     # Optional persona (a key under `personas:`); its SOUL.md becomes the system prompt.
     persona: default
   - name: terse

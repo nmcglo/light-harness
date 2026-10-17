@@ -78,6 +78,28 @@ class Workspace:
             raise WorkspaceError(f"path has multiple hard links: {raw}")
         return candidate
 
+    def resolve_directory(self, raw: str) -> Path:
+        """The real path for a directory ``raw`` that a tool may create or fill.
+
+        Same confinement as :meth:`resolve` (inside the root, never the root itself,
+        never denied), but the target may be missing or an existing *directory*;
+        an existing non-directory is refused."""
+        if not raw or "\x00" in raw:
+            raise WorkspaceError("invalid path")
+        try:
+            candidate = (self.root / raw).resolve()
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceError(f"cannot resolve path {raw!r}: {exc}") from exc
+        if candidate == self.root:
+            raise WorkspaceError(f"path is the workspace root directory itself: {raw}")
+        if not candidate.is_relative_to(self.root):
+            raise WorkspaceError(f"path is outside the workspace: {raw}")
+        if self._is_denied(candidate):
+            raise WorkspaceError(f"path is not accessible: {raw}")
+        if candidate.exists() and not candidate.is_dir():
+            raise WorkspaceError(f"path exists and is not a directory: {raw}")
+        return candidate
+
     def _is_denied(self, candidate: Path) -> bool:
         """Whether ``candidate`` is, or lies inside, a denied directory.
 

@@ -19,7 +19,8 @@ Endpoints:
                            each persona's stored ``SOUL.md``; ``text`` is the
                            config file verbatim; a file that cannot be read or
                            is not UTF-8 gets a 500 ``{"error"}`` instead)
-- ``GET  /api/tools``   -> ``{"tools": [...]}`` (built-in tool names)
+- ``GET  /api/tools``   -> ``{"tools": [...], "forgejo_tools": [...]}`` (core and Forgejo
+                           tool names)
 - ``POST /api/config``  -> JSON body naming any of ``providers``, ``agents``,
                            ``personas``, ``interaction``, ``webhooks``; only the sections the
                            body sends are rewritten (as YAML), the others are kept
@@ -60,7 +61,8 @@ from .httputil import (
     read_body,
     secret_matches,
 )
-from .tools.builtin import BUILTIN_TOOL_NAMES
+from .tools.builtin import CORE_TOOL_NAMES
+from .tools.forgejo import FORGEJO_TOOL_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -133,6 +135,8 @@ _PAGE_CSS = """  :root {
   .model-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .tools-block { border-top: 1px dashed var(--border); padding-top: 12px; }
   .tools-label { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .tools-columns { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 48px; }
+  .tools-col { min-width: 0; }
   .tool-check { display: flex; align-items: center; gap: 8px; font-size: 14px;
     color: var(--fg); margin-bottom: 6px; }
   .tool-check input { width: auto; }
@@ -356,19 +360,37 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
 
   function toolsBlock(tools) {
     var allChecked = tools == null;
-    var toolBoxes = state.builtinTools.map(function (t) {
-      var checked = !allChecked && Array.isArray(tools) && tools.indexOf(t) !== -1;
-      return '<label class="tool-check"><input type="checkbox" class="tool" value="' +
-        esc(t) + '"' + (checked ? " checked" : "") + "> " + esc(t) + "</label>";
-    }).join("");
-    var other = (allChecked || !Array.isArray(tools)) ? [] :
-      tools.filter(function (t) { return state.builtinTools.indexOf(t) === -1; });
+    var selected = Array.isArray(tools) ? tools : [];
+    function boxes(names) {
+      return names.map(function (t) {
+        var checked = allChecked || selected.indexOf(t) !== -1;
+        return '<label class="tool-check"><input type="checkbox" class="tool" value="' +
+          esc(t) + '"' + (checked ? " checked" : "") + "> " + esc(t) + "</label>";
+      }).join("");
+    }
+    var known = state.builtinTools.concat(state.forgejoTools);
+    var other = allChecked ? [] : selected.filter(function (t) {
+      return known.indexOf(t) === -1;
+    });
+    function column(title, allLabel, names) {
+      var every = names.length > 0 && (allChecked || names.every(function (t) {
+        return selected.indexOf(t) !== -1;
+      }));
+      return '<div class="tools-col"><div class="tools-label">' + title + "</div>" +
+        '<label class="tool-all-row"><input type="checkbox" class="tool-group-all"' +
+        (every ? " checked" : "") + "> " + allLabel + "</label>" +
+        '<div class="tool-list tool-group">' + boxes(names) + "</div></div>";
+    }
     var h = [];
     h.push('<div class="tools-block">');
     h.push('<label class="tool-all-row"><input type="checkbox" class="tool-all"' +
-      (allChecked ? " checked" : "") + "> All built-in tools (default)</label>");
-    h.push('<div class="tools-label">Tools (opt-in)</div>');
-    h.push('<div class="tool-list">' + toolBoxes + "</div>");
+      (allChecked ? " checked" : "") + "> All tools (default)</label>");
+    h.push('<div class="tools-columns">');
+    h.push(column("Standard tools", "All standard tools", state.builtinTools));
+    if (state.forgejoTools.length) {
+      h.push(column("Forgejo tools", "All Forgejo tools", state.forgejoTools));
+    }
+    h.push("</div>");
     h.push('<label><span>Other tools (comma-separated)</span>' +
       '<input class="agent-other-tools" value="' + esc(other.join(", ")) + '"></label>');
     h.push("</div>");
@@ -497,16 +519,15 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     webhookList.innerHTML = webhooks.length
       ? webhooks.map(function (w) { return webhookCard(w); }).join("")
       : '<p class="empty">No webhooks defined. Add one to trigger an agent over HTTP.</p>';
-    syncAllToolsDisabled();
+    syncOtherToolsDisabled();
   }
 
-  function syncAllToolsDisabled() {
+  // "Other tools" only applies to an explicit list; "All tools" saves no list at all.
+  function syncOtherToolsDisabled() {
     document.querySelectorAll(".agent").forEach(function (card) {
       var all = card.querySelector(".tool-all");
-      var disabled = all ? all.checked : false;
-      card.querySelectorAll(".tool-list input, .agent-other-tools").forEach(function (el) {
-        el.disabled = disabled;
-      });
+      var other = card.querySelector(".agent-other-tools");
+      if (other) other.disabled = all ? all.checked : false;
     });
   }
 
@@ -676,7 +697,29 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   agentList.addEventListener("change", function (e) {
     var t = e.target;
     markDirty();
-    if (t && t.classList.contains("tool-all")) syncAllToolsDisabled();
+    var block = t && t.closest ? t.closest(".tools-block") : null;
+    if (!block) return;
+    var allEl = block.querySelector(".tool-all");
+    if (t.classList.contains("tool-all")) {
+      if (t.checked) {
+        block.querySelectorAll(".tool-list input, .tool-group-all").forEach(function (el) {
+          el.checked = true;
+        });
+      }
+    } else if (t.classList.contains("tool-group-all")) {
+      t.closest(".tools-col").querySelectorAll(".tool-group input").forEach(function (el) {
+        el.checked = t.checked;
+      });
+      if (!t.checked) allEl.checked = false;
+    } else if (t.classList.contains("tool")) {
+      if (!t.checked) allEl.checked = false;
+      var col = t.closest(".tools-col");
+      var boxes = Array.from(col.querySelectorAll(".tool-group input"));
+      col.querySelector(".tool-group-all").checked = boxes.every(function (el) {
+        return el.checked;
+      });
+    }
+    syncOtherToolsDisabled();
   });
 
   personaList.addEventListener("click", function (e) {
@@ -747,8 +790,10 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   (async function init() {
     try {
       var res = await apiFetch("/api/tools");
-      state.builtinTools = (await res.json()).tools || [];
-    } catch (e) { state.builtinTools = []; }
+      var tools = await res.json();
+      state.builtinTools = tools.tools || [];
+      state.forgejoTools = tools.forgejo_tools || [];
+    } catch (e) { state.builtinTools = []; state.forgejoTools = []; }
     loadConfig();
   })();
 </script>
@@ -1250,7 +1295,9 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"exists": False, "path": str(path), "text": None, "data": {}})
 
     def _handle_get_tools(self) -> None:
-        self._send_json(200, {"tools": list(BUILTIN_TOOL_NAMES)})
+        self._send_json(
+            200, {"tools": list(CORE_TOOL_NAMES), "forgejo_tools": list(FORGEJO_TOOL_NAMES)}
+        )
 
     def _reject(self, status: int, payload: dict[str, Any]) -> None:
         """Answer a request whose body is not going to be read: the connection has

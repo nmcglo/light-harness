@@ -318,7 +318,31 @@ def test_serves_html_page(web_base: str) -> None:
 def test_get_tools(web_base: str) -> None:
     status, data = _get_json(web_base + "/api/tools")
     assert status == 200
-    assert data["tools"] == ["echo", "current_time", "add", "read_file", "write_file", "edit_file"]
+    assert data["tools"] == ["current_time", "read_file", "write_file", "edit_file"]
+
+
+def test_get_tools_lists_forgejo_tools_separately(web_base: str) -> None:
+    _, data = _get_json(web_base + "/api/tools")
+    assert data["forgejo_tools"] == [
+        "forgejo_pr",
+        "forgejo_pr_diff",
+        "forgejo_pr_comment",
+        "forgejo_pr_comment_edit",
+        "forgejo_pr_review",
+        "forgejo_pr_comment_delete",
+        "forgejo_pr_review_delete",
+        "forgejo_pr_create",
+        "forgejo_pr_close",
+        "forgejo_pr_merge",
+        "forgejo_issue_create",
+        "forgejo_issue_list",
+        "forgejo_issue",
+        "forgejo_issue_update",
+        "forgejo_issue_comment",
+        "forgejo_issue_comment_edit",
+        "forgejo_issue_comment_delete",
+        "forgejo_clone",
+    ]
 
 
 def test_get_config_absent(web_base: str) -> None:
@@ -428,7 +452,7 @@ def test_post_agents_personas_interaction(web_base: str, tmp_path: Path) -> None
         "providers": [{"name": "local", "base_url": "http://x/v1", "models": ["qwen"]}],
         "agents": [
             {"name": "a", "provider": "local", "model": "qwen", "persona": "p1"},
-            {"name": "b", "provider": "local", "model": "gpt", "tools": ["echo"]},
+            {"name": "b", "provider": "local", "model": "gpt", "tools": ["current_time"]},
         ],
         "personas": [{"name": "p1", "SOUL.md": "You are kind."}],
         "interaction": {"chat": {"agent": "b"}},
@@ -439,7 +463,7 @@ def test_post_agents_personas_interaction(web_base: str, tmp_path: Path) -> None
     parsed = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert [a["name"] for a in parsed["agents"]] == ["a", "b"]
     assert parsed["agents"][0]["persona"] == "p1"
-    assert parsed["agents"][1]["tools"] == ["echo"]
+    assert parsed["agents"][1]["tools"] == ["current_time"]
     assert parsed["personas"]["p1"]["SOUL.md"] == "You are kind."
     assert parsed["interaction"]["chat"]["agent"] == "b"
 

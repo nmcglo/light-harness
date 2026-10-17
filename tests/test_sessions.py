@@ -10,7 +10,8 @@ from typing import Any
 from light_harness.agent import Agent
 from light_harness.llm import ChatMessage, LLMResponse, ToolCall
 from light_harness.sessions import SessionLog
-from light_harness.tools import default_registry
+
+from ._helpers import sample_registry
 
 
 class FakeClient:
@@ -74,7 +75,7 @@ def test_agent_records_full_session_to_log(tmp_path: Path) -> None:
     )
     session_dir = tmp_path / "sessions"
     session = SessionLog(session_dir, meta={"persona": "default", "agent": "a", "model": "m"})
-    agent = Agent(client, default_registry(), session=session)
+    agent = Agent(client, sample_registry(), session=session)
     answer = asyncio.run(agent.run("What is 2 + 3?"))
     session.close()
 
