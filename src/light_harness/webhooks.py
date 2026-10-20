@@ -52,6 +52,7 @@ from .httputil import (
     secret_matches,
 )
 from .llm import OpenAICompatibleClient
+from .secrets import Redactor, with_secret_note
 from .sessions import SessionLog
 from .tools import build_tool_registry
 from .tools.builtin import BUILTIN_TOOL_NAMES, WORKSPACE_TOOL_NAMES
@@ -121,10 +122,18 @@ def default_agent_factory(
 ) -> Agent:
     """Build the real agent for a webhook's configured agent (client + tools +
     a persona session log under the agent's persona home). The webhook's own
-    ``system_prompt`` (when set) overrides the agent's persona-based prompt."""
+    ``system_prompt`` (when set) overrides the agent's persona-based prompt.
+
+    Webhooks are non-interactive, so secrets with ``confirm`` are denied, and the
+    payload is untrusted from the start (``deny_after_untrusted`` secrets too)."""
     settings = config.endpoint_for(agent_cfg)
-    registry = build_tool_registry(agent_cfg.tools, agent_cfg.workspace_path())
-    system_prompt = webhook.system_prompt or config.system_prompt_for(agent_cfg)
+    secrets = config.tool_secrets(agent_cfg, "webhook")
+    secrets.context.untrusted = True
+    registry = build_tool_registry(agent_cfg.tools, agent_cfg.workspace_path(), secrets)
+    redactor = config.redactor()
+    system_prompt = with_secret_note(
+        webhook.system_prompt or config.system_prompt_for(agent_cfg), secrets, registry.names()
+    )
     persona_name = agent_cfg.persona or agent_cfg.name
     ensure_persona(persona_name)
     session = SessionLog(
@@ -135,13 +144,16 @@ def default_agent_factory(
             "model": settings.model,
             "source": "webhook",
         },
+        redactor=redactor,
     )
     try:
         return Agent(
-            client=OpenAICompatibleClient(settings),
+            client=OpenAICompatibleClient(settings, guard=redactor),
             tools=registry,
             system_prompt=system_prompt,
             session=session,
+            redactor=redactor,
+            secret_context=secrets.context,
         )
     except BaseException:
         session.close()  # don't leak the open log file if construction fails
@@ -152,6 +164,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     """Route POSTs to configured webhook paths and run the target agent."""
 
     config: Config
+    redactor: Redactor
     run_slots: threading.BoundedSemaphore
     allowed_hosts: frozenset[str]
 
@@ -205,13 +218,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 suffix = ""
                 if agent.session is not None:
                     suffix = f" (session: {_session_log_name(agent.session.path)})"
-                print(f"{stamp} webhook {self.command} {path} -> agent '{webhook.agent}'{suffix}")
+                line = f"{stamp} webhook {self.command} {path} -> agent '{webhook.agent}'{suffix}"
+                print(self.redactor.redact(line))
             self._spawn(agent, body)
         except Exception as exc:  # noqa: BLE001 - report the failure to the caller
             self.run_slots.release()
             if agent is not None:  # built, but the worker never started
                 asyncio.run(_release_agent(agent))
-            self._send_json(500, {"message": f"{type(exc).__name__}: {exc}"})
+            self._send_json(
+                500, {"message": self.redactor.redact(f"{type(exc).__name__}: {exc}")}
+            )
             return
         self._send_json(200, {"agent": webhook.agent, "message": "OK"})
 
@@ -220,12 +236,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         The worker releases the caller's run slot when it finishes."""
         slots = self.run_slots
+        redact = self.redactor.redact
 
         def worker() -> None:
             try:
                 asyncio.run(self._run(agent, body))
             except Exception as exc:  # noqa: BLE001 - no caller left to report to
-                print(f"webhook run failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+                print(redact(f"webhook run failed: {type(exc).__name__}: {exc}"), file=sys.stderr)
             finally:
                 slots.release()
 
@@ -233,7 +250,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     async def _run(self, agent: Agent, body: bytes) -> str:
         try:
-            return await agent.run(parse_webhook_body(body))
+            text = parse_webhook_body(body)
+            secret = agent.secret_in(text)
+            if secret is not None:
+                print(
+                    f"webhook {urlsplit(self.path).path}: payload contains the value of "
+                    f"secret '{secret}'; it was redacted before being stored or sent",
+                    file=sys.stderr,
+                )
+            return await agent.run(text)
         finally:
             await _release_agent(agent)
 
@@ -295,6 +320,7 @@ def create_webhook_server(
 
     class BoundHandler(WebhookHandler):
         config = bound_config
+        redactor = bound_config.redactor()
         run_slots = bound_slots
         allowed_hosts = bound_hosts
 

@@ -292,10 +292,17 @@ def test_transport_errors_are_retried_with_exponential_backoff(monkeypatch) -> N
 def test_repl_survives_a_failed_turn(monkeypatch) -> None:
     from light_harness import cli
     from light_harness.llm import LLMError
+    from light_harness.secrets import Redactor
 
     class FlakyAgent:
+        redactor = Redactor.empty()
+        secret_context = None
+
         def __init__(self) -> None:
             self.prompts: list[str] = []
+
+        def secret_in(self, text: str) -> None:
+            return None
 
         async def run(self, prompt: str, on_token=None, on_tool=None) -> str:
             self.prompts.append(prompt)
@@ -405,10 +412,15 @@ def test_repl_slash_commands_do_not_reach_the_model(monkeypatch) -> None:
     from light_harness import cli
 
     class Stub:
+        secret_context = None
+
         def __init__(self) -> None:
             self.prompts: list[str] = []
             self.resets = 0
             self.tools = type("T", (), {"tool_schemas": lambda self: []})()
+
+        def secret_in(self, text: str) -> None:
+            return None
 
         async def run(self, prompt: str, on_token=None, on_tool=None) -> str:
             self.prompts.append(prompt)
@@ -530,3 +542,18 @@ def test_glyphs_fall_back_to_ascii_without_unicode(monkeypatch) -> None:
     assert glyphs_for(console("utf-8")) is ASCII
     assert not is_interactive(console("utf-8", term="dumb"))
     assert all(str(v).isascii() for v in vars(ASCII).values())
+
+
+def test_system_prompt_command_prints_the_prompt_verbatim(monkeypatch) -> None:
+    import io
+
+    from rich.console import Console
+
+    from light_harness import cli
+
+    out = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=out, width=200))
+    agent = type("A", (), {"system_prompt": "Be [bold]terse[/bold].\nHosts: [x]"})()
+
+    assert cli._run_command(agent, "/system_prompt") is False  # type: ignore[arg-type]
+    assert out.getvalue() == "Be [bold]terse[/bold].\nHosts: [x]\n"

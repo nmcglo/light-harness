@@ -17,6 +17,13 @@ from pathlib import Path
 
 import pytest
 
+from light_harness.secrets import (
+    SecretContext,
+    SecretPolicy,
+    SecretRegistry,
+    SecretSpec,
+    ToolSecrets,
+)
 from light_harness.tools import build_tool_registry
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
@@ -73,14 +80,25 @@ def ws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("LIGHT_HARNESS_HOME", str(home))
+    monkeypatch.setenv("CLONE_TEST_TOKEN", TOKEN)
     root = tmp_path / "ws"
     root.mkdir()
     return root
 
 
 def _clone(workspace: Path, forge: str, **args: object) -> str:
-    registry = build_tool_registry(["forgejo_clone"], workspace)
-    arguments = {"instance_url": forge, "repo": "owner/repo", "token": TOKEN, **args}
+    """Run the tool with the token found in the registry by the forge's host."""
+    secrets = SecretRegistry(workspace.parent / "home", audit=lambda _line: None)
+    secrets.define(
+        "forge",
+        SecretSpec(
+            source="env:CLONE_TEST_TOKEN",
+            allow=SecretPolicy(tools=["forgejo_clone"], hosts=["127.0.0.1"]),
+        ),
+    )
+    context = SecretContext(agent="a", interaction="chat")
+    registry = build_tool_registry(["forgejo_clone"], workspace, ToolSecrets(secrets, context))
+    arguments = {"instance_url": forge, "repo": "owner/repo", **args}
     return asyncio.run(registry.run("forgejo_clone", arguments))
 
 

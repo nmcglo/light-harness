@@ -2,18 +2,25 @@
 
 The config file lives at ``$LIGHT_HARNESS_HOME/config.yaml`` (default home
 ``$HOME/.light-harness``). It is optional. There are no per-field environment
-overrides: every endpoint setting comes from the file, which may pull secrets
+overrides: every endpoint setting comes from the file, which may pull values
 from the environment with ``$NAME`` or ``${NAME}`` (set variables are
-substituted, unset ones are left as-is; but a provider ``api_key`` or webhook
-``secret`` that references an unset variable is cleared / disabled with a warning,
-never used literally).
+substituted, unset ones are left as-is).
+
+Credentials never live in the file. A provider ``api_key`` or webhook ``secret``
+is a reference: ``secret:NAME`` (a ``secrets:`` entry) or ``$NAME`` (routed
+through the secret registry as ``env:NAME``). An unresolved reference clears the
+field (or disables the webhook) with a warning; it is never used literally, and a
+literal that looks like a credential is rejected.
 
 Structure:
 
+- ``secrets:`` maps a name to a ``source`` (``env:NAME`` / ``file:PATH``) plus
+  the policy that says which tools, hosts, agents and interactions may use it
+  (see :mod:`light_harness.secrets`).
 - ``providers:`` maps a name to an endpoint (``base_url``, ``api_key``,
   ``timeout``) plus the ``models`` it offers -- the set you can switch among.
 - ``agents:`` names each agent's ``provider`` and ``model``, plus the ``tools``
-  it may call (opt-in) and its ``persona``.
+  it may call (opt-in), its ``persona`` and optional ``secrets`` bindings.
 - ``personas:``, ``interaction:``, ``webhooks:`` -- see the README.
 
 ``Config.endpoint_for()`` resolves an agent into the effective :class:`Settings`
@@ -23,13 +30,28 @@ its loop talks to. New features add their own section + settings model to
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .secrets import (
+    REFERENCE_PREFIX,
+    SECRET_NAME_RE,
+    ConfirmFn,
+    Redactor,
+    SecretContext,
+    SecretRegistry,
+    SecretSpec,
+    ToolSecrets,
+    looks_like_secret,
+    parse_source,
+)
 
 CONFIG_FILENAME = "config.yaml"
 
@@ -213,6 +235,66 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def write_config_text(text: str) -> Path:
+    """Atomically write ``text`` to the config file and return its path."""
+    path = config_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+SECRETS_DIRNAME = "secrets"
+
+
+def store_secret_value(name: str, value: str) -> str:
+    """Write ``value`` to the file backend (``<home>/secrets/<name>``, mode 0600)
+    and point ``secrets.<name>.source`` in ``config.yaml`` at it, keeping the
+    entry's policy. Returns the source. The value never goes into the config.
+
+    Raises :class:`ValueError` for a bad name or empty value, and
+    :class:`ConfigError` if the config file cannot be parsed."""
+    if not SECRET_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid secret name {name!r}")
+    if not value:
+        raise ValueError("secret value must not be empty")
+    directory = config_home() / SECRETS_DIRNAME
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = directory / name
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".secret-", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(value)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    source = f"file:{SECRETS_DIRNAME}/{name}"
+    data = load_yaml(config_file_path())
+    section = data.get("secrets")
+    if not isinstance(section, dict):
+        section = {}
+    entry = section.get(name)
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    if entry.get("source") != source:
+        entry["source"] = source
+        section[name] = entry
+        data["secrets"] = section
+        write_config_text(
+            yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True)
+        )
+    return source
+
+
 _ENV_VAR_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
 
@@ -257,7 +339,135 @@ def unresolved_env_vars(value: str) -> list[str]:
     return sorted({n for n in names if n not in os.environ})
 
 
-def _parse_providers(raw: Any, warnings: list[str]) -> dict[str, Provider]:
+def _resolve_config_env(raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve ``$NAME`` references everywhere except the credential fields
+    (provider ``api_key``, webhook ``secret``) and the ``secrets:`` section, which
+    the secret registry resolves so their values are known to the redactor."""
+    resolved = {k: v if k == "secrets" else _resolve_env_in_value(v) for k, v in raw.items()}
+    providers = raw.get("providers")
+    if isinstance(providers, dict):
+        for name, spec in providers.items():
+            if isinstance(spec, dict) and "api_key" in spec:
+                resolved["providers"][name]["api_key"] = spec["api_key"]
+    webhooks = raw.get("webhooks")
+    if isinstance(webhooks, list):
+        for index, entry in enumerate(webhooks):
+            if isinstance(entry, dict) and "secret" in entry:
+                resolved["webhooks"][index]["secret"] = entry["secret"]
+    return resolved
+
+
+def _credential(
+    value: str, label: str, implicit_name: str, registry: SecretRegistry, warnings: list[str]
+) -> str | None:
+    """Resolve a credential field (``label`` names it in warnings). Returns the
+    value, ``""`` when the field is empty, or ``None`` (with a warning) when it
+    cannot be used: an unknown or unresolved reference, or a literal credential.
+
+    Forms: ``secret:NAME``, ``$NAME`` / ``${NAME}`` (registered as ``env:NAME``),
+    or a literal -- kept (and registered for redaction) unless it looks like a
+    real credential, which belongs in ``secrets:`` or the environment."""
+    text = value.strip()
+    if not text:
+        return ""
+    if text.startswith(REFERENCE_PREFIX):
+        name = text[len(REFERENCE_PREFIX) :].strip()
+        if registry.spec(name) is None:
+            warnings.append(f"{label} references unknown secret '{name}'")
+            return None
+        resolved = registry.resolve_field(name, implicit_name)
+        if resolved is None:
+            warnings.append(f"{label} references secret '{name}', which is not set")
+        return resolved
+    whole = _ENV_VAR_RE.fullmatch(text)
+    if whole:
+        var = whole.group(1) or whole.group(2)
+        registry.define_implicit(f"env:{var}", source=f"env:{var}")
+        resolved = registry.resolve_field(f"env:{var}", implicit_name)
+        if resolved is None:
+            warnings.append(f"{label} references unset variable(s) ${var}")
+        return resolved
+    if has_env_reference(text):
+        text = resolve_env(text)
+        missing = unresolved_env_vars(text)
+        if missing:
+            warnings.append(
+                f"{label} references unset variable(s) {', '.join('$' + n for n in missing)}"
+            )
+            return None
+    elif looks_like_secret(text):
+        warnings.append(
+            f"{label} looks like a literal credential; put it in secrets: or the "
+            "environment and reference it (secret:NAME or $NAME)"
+        )
+        return None
+    registry.define_implicit(implicit_name, value=text)
+    return text
+
+
+def _parse_secrets(raw: Any, registry: SecretRegistry, warnings: list[str]) -> None:
+    """Parse the ``secrets:`` section into ``registry``. Bad entries are dropped
+    (and reported); a source that is not ``env:`` / ``file:`` is never used as a
+    literal value."""
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        warnings.append("secrets: expected a mapping; section ignored")
+        return
+    for name, entry in raw.items():
+        where = f"secrets.{name}"
+        if not isinstance(name, str) or not SECRET_NAME_RE.fullmatch(name):
+            warnings.append(f"{where}: invalid secret name; entry ignored")
+            continue
+        if not isinstance(entry, dict):
+            warnings.append(f"{where}: expected a mapping with 'source'; entry ignored")
+            continue
+        try:
+            spec = SecretSpec.model_validate(entry)
+        except ValidationError as exc:
+            warnings.append(f"{where}: {_first_error(exc)}; entry ignored")
+            continue
+        if parse_source(spec.source) is None:
+            hint = " (literal values are not allowed)" if looks_like_secret(spec.source) else ""
+            warnings.append(
+                f"{where}: source must be env:NAME or file:PATH{hint}; entry ignored"
+            )
+            continue
+        if spec.allow is not None and not (spec.allow.tools and spec.allow.hosts):
+            warnings.append(
+                f"{where}: allow needs both 'tools' and 'hosts'; no tool can use it"
+            )
+        registry.define(name, spec)
+        if not registry.is_resolved(name):
+            warnings.append(f"{where}: {spec.source} is not set")
+
+
+def known_secret_values(raw: dict[str, Any]) -> dict[str, str]:
+    """Every secret value the raw config mapping ``raw`` refers to (``secrets:``
+    entries and the credential fields' references), by name -- without loading
+    the config: no audit lines, warnings or persona directories. For redacting
+    output about the config (the web UI)."""
+    registry = SecretRegistry(config_home(), audit=lambda _line: None)
+    ignored: list[str] = []
+    _parse_secrets(raw.get("secrets"), registry, ignored)
+    providers = raw.get("providers")
+    if isinstance(providers, dict):
+        for name, spec in providers.items():
+            if isinstance(spec, dict) and isinstance(spec.get("api_key"), str):
+                label = f"providers.{name}.api_key"
+                _credential(spec["api_key"], label, label, registry, ignored)
+    webhooks = raw.get("webhooks")
+    if isinstance(webhooks, list):
+        for entry in webhooks:
+            if isinstance(entry, dict) and isinstance(entry.get("secret"), str):
+                label = f"webhooks.{entry.get('path')}.secret"
+                _credential(entry["secret"], label, label, registry, ignored)
+    return registry.values()
+
+
+def _parse_providers(
+    raw: Any, registry: SecretRegistry, warnings: list[str]
+) -> dict[str, Provider]:
     """Parse the ``providers:`` section. Malformed entries are skipped (and reported)."""
     if raw is None:
         return {}
@@ -274,14 +484,14 @@ def _parse_providers(raw: Any, warnings: list[str]) -> dict[str, Provider]:
         except ValidationError as exc:
             warnings.append(f"providers.{name}: {_first_error(exc)}; entry ignored")
             continue
-        missing_key = unresolved_env_vars(provider.api_key)
-        if missing_key:
-            # Fail closed: an unset "$NAME" must not be sent as the API key.
-            warnings.append(
-                f"providers.{name}: api_key references unset variable(s) "
-                f"{', '.join('$' + n for n in missing_key)}; api_key cleared"
-            )
-            provider = provider.model_copy(update={"api_key": ""})
+        key = _credential(
+            provider.api_key, f"providers.{name}: api_key",
+            f"providers.{name}.api_key", registry, warnings,
+        )  # fmt: skip
+        if key is None:
+            # Fail closed: an unresolved reference must not be sent as the API key.
+            warnings[-1] += "; api_key cleared"
+        provider = provider.model_copy(update={"api_key": key or ""})
         missing_url = unresolved_env_vars(provider.base_url)
         if missing_url:
             warnings.append(
@@ -317,10 +527,23 @@ def _workspace_problem(raw: str) -> tuple[str | None, Path | None]:
     return None, resolved
 
 
-def _check_agent_tools(agent: AgentConfig, where: str, warnings: list[str]) -> AgentConfig:
+def protected_paths(registry: SecretRegistry | None = None) -> list[Path]:
+    """Files holding credentials outside the harness home: ``./.env`` and every
+    ``file:`` secret. The file tools refuse them; a workspace containing one is
+    reported at load."""
+    paths = [Path(".env").resolve()]
+    if registry is not None:
+        paths += [p.expanduser().resolve() for p in registry.file_paths()]
+    return paths
+
+
+def _check_agent_tools(
+    agent: AgentConfig, where: str, registry: SecretRegistry, warnings: list[str]
+) -> AgentConfig:
     """Validate ``agent.workspace`` (failing closed: a bad one is dropped, which
     disables the workspace tools) and flag tools the config asks for but cannot get:
-    workspace tools with no workspace, and names that are not built in."""
+    workspace tools with no workspace, and names that are not built in. Also flags
+    credential files inside the workspace and ``secrets`` bindings to unknown names."""
     from .tools.builtin import BUILTIN_TOOL_NAMES, WORKSPACE_TOOL_NAMES  # lazy import
 
     if agent.workspace is not None:
@@ -333,6 +556,26 @@ def _check_agent_tools(agent: AgentConfig, where: str, warnings: list[str]) -> A
             agent = agent.model_copy(update={"workspace": None})
         else:
             agent = agent.model_copy(update={"workspace": str(resolved)})
+            exposed = [
+                p for p in protected_paths(registry) if p.is_relative_to(resolved) and p.exists()
+            ]
+            if exposed:
+                warnings.append(
+                    f"{where} ({agent.name}): workspace {resolved} contains credential "
+                    f"file(s) {', '.join(str(p) for p in exposed)}; the file tools refuse "
+                    "them, but move them out of the workspace"
+                )
+    bindings = {}
+    for purpose, secret in agent.secrets.items():
+        if registry.spec(secret) is None:
+            warnings.append(
+                f"{where} ({agent.name}): secrets.{purpose} names unknown secret "
+                f"'{secret}'; binding ignored"
+            )
+        else:
+            bindings[purpose] = secret
+    if bindings != agent.secrets:
+        agent = agent.model_copy(update={"secrets": bindings})
     if agent.workspace is None:
         wanted = [t for t in agent.tools or [] if t in WORKSPACE_TOOL_NAMES]
         if wanted:
@@ -348,7 +591,9 @@ def _check_agent_tools(agent: AgentConfig, where: str, warnings: list[str]) -> A
     return agent
 
 
-def _parse_agents(raw: Any, warnings: list[str]) -> list[AgentConfig]:
+def _parse_agents(
+    raw: Any, registry: SecretRegistry, warnings: list[str]
+) -> list[AgentConfig]:
     """Parse the ``agents:`` section. Entries without a usable ``name`` are
     skipped; duplicates and malformed entries are dropped (and reported)."""
     if raw is None:
@@ -372,7 +617,7 @@ def _parse_agents(raw: Any, warnings: list[str]) -> list[AgentConfig]:
         except ValidationError as exc:
             warnings.append(f"{where} ({name}): {_first_error(exc)}; entry ignored")
             continue
-        agent = _check_agent_tools(agent, where, warnings)
+        agent = _check_agent_tools(agent, where, registry, warnings)
         if agent.name in seen:
             warnings.append(f"{where}: duplicate agent name '{agent.name}'; entry ignored")
             continue
@@ -415,7 +660,9 @@ def _parse_interaction(raw: Any, warnings: list[str]) -> Interaction:
         return Interaction()
 
 
-def _parse_webhooks(raw: Any, warnings: list[str]) -> list[WebhookConfig]:
+def _parse_webhooks(
+    raw: Any, registry: SecretRegistry, warnings: list[str]
+) -> list[WebhookConfig]:
     """Parse the ``webhooks:`` section. Each entry needs a ``path`` (a string
     starting with ``/``); ``agent`` names the handling agent, ``secret``
     (optional) requires ``Authorization: Bearer <secret>``, and ``system_prompt``
@@ -445,14 +692,18 @@ def _parse_webhooks(raw: Any, warnings: list[str]) -> list[WebhookConfig]:
             else:
                 warnings.append(f"{where} ({path}): 'secret' must be a string; entry ignored")
                 continue
-        if isinstance(secret, str) and (missing := unresolved_env_vars(secret)):
-            # Fail closed: keeping the literal "$NAME" would make the secret a known
-            # string, and dropping the secret would leave the webhook open.
-            warnings.append(
-                f"{where} ({path}): 'secret' references unset variable(s) "
-                f"{', '.join('$' + n for n in missing)}; entry ignored"
-            )
-            continue
+        secret = normalized.get("secret")
+        if isinstance(secret, str):
+            resolved = _credential(
+                secret, f"{where} ({path}): 'secret'", f"webhooks.{path}.secret",
+                registry, warnings,
+            )  # fmt: skip
+            if resolved is None:
+                # Fail closed: keeping the literal "$NAME" would make the secret a known
+                # string, and dropping the secret would leave the webhook open.
+                warnings[-1] += "; entry ignored"
+                continue
+            normalized["secret"] = resolved
         system_prompt = normalized.get("system_prompt")
         if system_prompt is not None:
             if not isinstance(system_prompt, str):
@@ -536,6 +787,11 @@ class AgentConfig(BaseModel):
     # e.g. via its ``SOUL.md`` (used as the system prompt).
     persona: str | None = None
 
+    # Optional purpose -> secret name bindings (e.g. ``forgejo: forgejo_main``):
+    # the named secret is the one tools of that purpose use, instead of the one
+    # found by host. Its policy still applies.
+    secrets: dict[str, str] = Field(default_factory=dict)
+
     # Optional absolute directory the file tools (read_file/write_file/edit_file)
     # are confined to. Without it those tools are unavailable to this agent.
     workspace: str | None = None
@@ -599,7 +855,7 @@ class Settings(BaseModel):
 
     model: str = DEFAULT_MODEL
     base_url: str = DEFAULT_BASE_URL
-    api_key: str = DEFAULT_API_KEY
+    api_key: str = Field(default=DEFAULT_API_KEY, repr=False)
     timeout: float = Field(default=DEFAULT_TIMEOUT, gt=0)
 
     @classmethod
@@ -632,6 +888,7 @@ class Config:
         webhooks: list[WebhookConfig],
         warnings: list[str] | None = None,
         webhook_server: WebhookServerConfig | None = None,
+        secrets: SecretRegistry | None = None,
     ) -> None:
         self.providers = providers
         self.agents = agents
@@ -639,26 +896,46 @@ class Config:
         self.interaction = interaction
         self.webhooks = webhooks
         self.webhook_server = webhook_server or WebhookServerConfig()
+        self.secrets = secrets if secrets is not None else SecretRegistry(config_home())
         # Human-readable notes about config entries that were ignored on load.
         self.warnings = warnings if warnings is not None else []
+
+    def redactor(self) -> Redactor:
+        """A :class:`Redactor` for every secret value this config knows."""
+        return Redactor(self.secrets.values())
+
+    def tool_secrets(
+        self,
+        agent: AgentConfig,
+        interaction: Literal["chat", "webhook"],
+        confirm: ConfirmFn | None = None,
+    ) -> ToolSecrets:
+        """The secret access handed to ``agent``'s tools for one session."""
+        context = SecretContext(
+            agent=agent.name, interaction=interaction, bindings=dict(agent.secrets),
+            confirm=confirm,
+        )  # fmt: skip
+        return ToolSecrets(self.secrets, context)
 
     @classmethod
     def load(cls) -> Config:
         """Load the config file. Raises :class:`ConfigError` if it cannot be parsed;
         entries that are individually malformed are dropped and listed in ``warnings``."""
-        raw = _resolve_env_in_value(load_yaml(config_file_path()))
+        raw = _resolve_config_env(load_yaml(config_file_path()))
         warnings: list[str] = []
-        providers = _parse_providers(raw.get("providers"), warnings)
+        registry = SecretRegistry(config_home())
+        _parse_secrets(raw.get("secrets"), registry, warnings)
+        providers = _parse_providers(raw.get("providers"), registry, warnings)
         for legacy in ("extra_tools", "disable_extra_tools"):
             if legacy in raw:
                 warnings.append(
                     f"{legacy}: no longer used; every agent gets all tools unless its "
                     "'tools:' list names a subset"
                 )
-        agents = _parse_agents(raw.get("agents"), warnings)
+        agents = _parse_agents(raw.get("agents"), registry, warnings)
         personas = _parse_personas(raw.get("personas"), warnings)
         interaction = _parse_interaction(raw.get("interaction"), warnings)
-        webhooks = _parse_webhooks(raw.get("webhooks"), warnings)
+        webhooks = _parse_webhooks(raw.get("webhooks"), registry, warnings)
         for name, files in personas.items():
             if _valid_persona_name(name):
                 ensure_persona(name, files.get(SOUL_FILENAME, ""))
@@ -673,6 +950,7 @@ class Config:
             webhooks=webhooks,
             warnings=warnings,
             webhook_server=webhook_server,
+            secrets=registry,
         )
 
     def active_agent(self) -> AgentConfig:

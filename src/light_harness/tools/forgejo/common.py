@@ -1,5 +1,7 @@
-"""Helpers shared by the Forgejo tools: the error type, repo/URL resolution, and the
-HTTP call to the API."""
+"""Helpers shared by the Forgejo tools: the error type, repo/URL resolution, the
+HTTP call to the API, and :class:`ForgejoTool`, the base that looks up the API
+token for the target host in the secret registry (the model never sees or names
+it)."""
 
 from __future__ import annotations
 
@@ -7,6 +9,11 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
+
+from ...secrets import SecretValue, ToolSecrets
+
+# The ``agents[].secrets`` key that binds the Forgejo tools to a secret.
+SECRET_PURPOSE = "forgejo"
 
 
 class ForgejoError(Exception):
@@ -20,7 +27,7 @@ def parse_repo_url(url: str) -> tuple[str, str]:
     if parts.scheme not in ("http", "https") or not parts.netloc or len(segments) < 2:
         raise ForgejoError(f"not a Forgejo repo URL (expected https://host/owner/repo): {url}")
     if parts.username or parts.password:
-        raise ForgejoError("repo URL must not embed credentials; pass 'token' instead")
+        raise ForgejoError("repo URL must not embed credentials")
     owner, name = segments[-2], segments[-1].removesuffix(".git")
     prefix = "".join(f"/{s}" for s in segments[:-2])
     return f"{parts.scheme}://{parts.netloc}{prefix}", f"{owner}/{name}"
@@ -54,10 +61,37 @@ def positive_id(value: Any, label: str) -> int:
     return number
 
 
-def require_token(token: str | None, what: str) -> str:
+def require_token(token: SecretValue | None, what: str) -> SecretValue:
     if not token:
-        raise ForgejoError(f"{what} requires an API token")
+        raise ForgejoError(
+            f"{what} requires an API token; no secret is configured for this host"
+        )
     return token
+
+
+class ForgejoTool:
+    """Base for the Forgejo tools: holds the :class:`ToolSecrets` they were built
+    with and resolves the token for the host named by ``url`` / ``instance_url``."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    # Results carry text written by others (issue/PR bodies, diffs): once one is in
+    # the conversation, secrets marked ``deny_after_untrusted`` are refused.
+    untrusted_output = False
+
+    def __init__(self, secrets: ToolSecrets | None = None) -> None:
+        self._secrets = secrets
+
+    def _token(self, arguments: dict[str, Any]) -> SecretValue | None:
+        target = arguments.get("url") or arguments.get("instance_url")
+        if self._secrets is None or not isinstance(target, str):
+            return None
+        return self._secrets.for_url(SECRET_PURPOSE, self.name, target)
+
+    def _args(self, arguments: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        """``keys`` picked from ``arguments`` plus the looked-up ``token``."""
+        return {**{k: arguments.get(k) for k in keys}, "token": self._token(arguments)}
 
 
 async def send(
@@ -65,7 +99,7 @@ async def send(
     base: str,
     slug: str,
     path: str,
-    token: str | None,
+    token: SecretValue | None,
     client: httpx.AsyncClient | None,
     timeout: float,
     accept: str = "application/json",
@@ -75,19 +109,21 @@ async def send(
     ok_status: int | tuple[int, ...] = 200,
 ) -> httpx.Response:
     """Call ``{base}/api/v1/repos/{owner}/{repo}{path}``; a status outside ``ok_status``
-    raises :class:`ForgejoError`."""
+    raises :class:`ForgejoError`. With a token, redirects are not followed, so the
+    ``Authorization`` header cannot be forwarded to another host."""
     owner, name = slug.split("/")
     endpoint = f"{base}/api/v1/repos/{quote(owner, safe='')}/{quote(name, safe='')}{path}"
     headers = {"Accept": accept}
     if token:
-        headers["Authorization"] = f"token {token}"
+        headers["Authorization"] = f"token {token.reveal()}"
     own = client is None
-    http = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    http = client or httpx.AsyncClient(timeout=timeout)
     try:
         try:
             response = await http.request(
-                method, endpoint, headers=headers, json=json_body, params=params
-            )
+                method, endpoint, headers=headers, json=json_body, params=params,
+                follow_redirects=not token,
+            )  # fmt: skip
         except httpx.HTTPError as exc:
             raise ForgejoError(f"request to {endpoint} failed: {exc}") from exc
     finally:
@@ -108,7 +144,7 @@ async def ensure_comment_belongs(
     number: int,
     comment_id: int,
     label: str,
-    token: str | None,
+    token: SecretValue | None,
     client: httpx.AsyncClient | None,
     timeout: float,
 ) -> None:

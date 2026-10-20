@@ -8,6 +8,7 @@ import json
 import httpx
 import pytest
 
+from light_harness.secrets import SecretValue
 from light_harness.tools.forgejo.issue import delete_issue_comment, edit_issue_comment
 from light_harness.tools.forgejo.pr import (
     ForgejoError,
@@ -16,7 +17,7 @@ from light_harness.tools.forgejo.pr import (
     edit_pr_comment,
 )
 
-REPO = {"instance_url": "https://forge.test", "repo": "o/r", "token": "tok"}
+REPO = {"instance_url": "https://forge.test", "repo": "o/r", "token": SecretValue("forgejo", "tok")}
 API = "https://forge.test/api/v1/repos/o/r"
 
 

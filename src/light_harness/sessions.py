@@ -5,6 +5,7 @@ Each chat session is written to an append-only JSONL file under
 session metadata (persona, agent, model); every subsequent line is one chat
 message, so a session file captures the full conversation: user prompts,
 assistant replies, the tool calls the model requested, and each tool's result.
+Every line goes through the :class:`Redactor` before it is written.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Any
 from uuid import uuid4
 
 from .llm import ChatMessage
+from .secrets import Redactor
 
 
 def _utc_stamp() -> str:
@@ -33,9 +35,12 @@ class SessionLog:
     when the session ends.
     """
 
-    def __init__(self, sessions_dir: Path, meta: dict[str, str]) -> None:
+    def __init__(
+        self, sessions_dir: Path, meta: dict[str, str], redactor: Redactor | None = None
+    ) -> None:
         sessions_dir.mkdir(parents=True, exist_ok=True)
         self.path = sessions_dir / f"{_utc_stamp()}_{uuid4().hex[:8]}.jsonl"
+        self._redactor = redactor if redactor is not None else Redactor.empty()
         self._lock = threading.Lock()
         self._fh = self.path.open("a", encoding="utf-8")
         self._write_line(json.dumps({"type": "session", **meta}, ensure_ascii=False))
@@ -55,6 +60,7 @@ class SessionLog:
         self._write_line(json.dumps(payload, ensure_ascii=False))
 
     def _write_line(self, line: str) -> None:
+        line = self._redactor.redact(line)
         # write + flush are two steps on a buffered file; the lock keeps another
         # thread's record from landing between them or splitting this line.
         with self._lock:

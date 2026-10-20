@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..config import config_home
+from ..config import config_home, protected_paths
+from ..secrets import ToolSecrets
 from .base import Tool
 from .edit_diff import (
     EditError,
@@ -427,37 +428,46 @@ FILE_TOOL_NAMES: frozenset[str] = frozenset(
 WORKSPACE_TOOL_NAMES: frozenset[str] = FILE_TOOL_NAMES | FORGEJO_WORKSPACE_TOOL_NAMES
 
 
-def make_workspace(root: Path) -> Workspace:
+def make_workspace(root: Path, secrets: ToolSecrets | None = None) -> Workspace:
     """A :class:`Workspace` at ``root`` that also keeps the harness's own state
-    directory (``config.yaml`` with API keys, session logs) off limits."""
-    return Workspace(root, deny=[config_home()])
+    directory (``config.yaml``, session logs), ``./.env`` and every ``file:``
+    secret off limits."""
+    registry = secrets.registry if secrets is not None else None
+    return Workspace(root, deny=[config_home(), *protected_paths(registry)])
 
 
-def builtin_tools(workspace: Path | None = None) -> list[Tool]:
+def builtin_tools(
+    workspace: Path | None = None, secrets: ToolSecrets | None = None
+) -> list[Tool]:
     """The built-in tools, in registration order.
 
     The file tools and ``forgejo_clone`` exist only when ``workspace`` is given:
     without a root to confine them to they would have the whole filesystem.
+    ``secrets`` gives the tools that call authenticated APIs their credentials.
     """
     tools: list[Tool] = [CurrentTimeTool()]
-    ws = make_workspace(workspace) if workspace is not None else None
+    ws = make_workspace(workspace, secrets) if workspace is not None else None
     if ws is not None:
         tools += [ReadFileTool(ws), WriteFileTool(ws), EditFileTool(ws)]
-    return tools + forgejo_tools(ws)
+    return tools + forgejo_tools(ws, secrets)
 
 
-def default_registry(workspace: Path | None = None) -> ToolRegistry:
+def default_registry(
+    workspace: Path | None = None, secrets: ToolSecrets | None = None
+) -> ToolRegistry:
     """Build a registry preloaded with every built-in tool available for ``workspace``."""
     from . import ToolRegistry  # local import avoids a circular import at load
 
     registry = ToolRegistry()
-    for tool in builtin_tools(workspace):
+    for tool in builtin_tools(workspace, secrets):
         registry.register(tool)
     return registry
 
 
 def build_tool_registry(
-    selection: list[str] | None, workspace: Path | None = None
+    selection: list[str] | None,
+    workspace: Path | None = None,
+    secrets: ToolSecrets | None = None,
 ) -> ToolRegistry:
     """Build a registry from an opt-in tool selection.
 
@@ -468,10 +478,10 @@ def build_tool_registry(
     from . import ToolRegistry  # local import avoids a circular import at load
 
     if selection is None:
-        return default_registry(workspace)
+        return default_registry(workspace, secrets)
     registry = ToolRegistry()
     wanted = set(selection)
-    for tool in builtin_tools(workspace):
+    for tool in builtin_tools(workspace, secrets):
         if tool.name in wanted:
             registry.register(tool)
     return registry

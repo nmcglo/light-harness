@@ -24,13 +24,14 @@ are written in Python.
 
 ```sh
 uv sync --group dev                                  # create .venv, install deps, write uv.lock
-cp .env.example .env                                 # secrets, referenced from config as $NAME
+cp .env.example .env                                 # secret values, referenced from config's secrets:
 cp config.yaml.example ~/.light-harness/config.yaml  # then edit
 
 uv run agent tools                  # list the built-in tools
 uv run agent chat "What is 2 + 3?"  # one-shot
 uv run agent chat                   # interactive REPL
 uv run agent web                    # edit the config in a local web UI
+uv run agent secrets list           # configured secrets and their policies (never values)
 uv run agent webhooks               # serve the configured webhook listeners
 ```
 
@@ -54,7 +55,7 @@ uv run mypy
 | Alt-Enter | Insert a newline |
 | Ctrl-C (while typing) | Clear the input; on an empty prompt, leave the chat |
 | Ctrl-C (during a reply) | Stop the reply; the partial reply stays in the conversation |
-| `/help`, `/clear`, `/tools`, `/exit` (`/quit`) | Commands (Tab completes them) |
+| `/help`, `/clear`, `/tools`, `/system_prompt`, `/exit` (`/quit`) | Commands (Tab completes them); `/system_prompt` prints the system prompt the agent was given, including the secrets note |
 
 Anything that isn't a command is sent to the model.
 
@@ -98,13 +99,15 @@ provider, model, base URL and API key, so agents on different providers never
 share credentials.
 
 **Env interpolation.** Config values may use `$NAME` or `${NAME}`. Variables
-that are set get substituted; unset ones are left as-is, except in credentials:
+that are set get substituted; unset ones are left as-is, except in credentials
+(see [Secrets](#secrets)):
 
-- a provider `api_key` that references an unset variable is cleared, so
-  `agent chat` reports "No API key";
-- a webhook `secret` that references an unset variable disables that webhook.
+- a provider `api_key` that doesn't resolve is cleared, so `agent chat`
+  reports "No API key";
+- a webhook `secret` that doesn't resolve disables that webhook.
 
-Both cases print a `Config warning:`.
+Both cases print a `Config warning:`. An unresolved reference is never used
+literally.
 
 **Errors.** If the file isn't valid YAML, or its top level isn't a mapping, the
 command aborts. Malformed entries (an agent without a name, a webhook path that
@@ -115,8 +118,9 @@ to stderr.
 
 | Section | Purpose |
 |---|---|
+| `secrets:` | Named credentials: a `source` reference plus the policy for using it (see [Secrets](#secrets)). |
 | `providers:` | Named endpoints: `base_url`, `api_key`, `timeout`, and a `models` list. |
-| `agents:` | Named agents: `provider`, `model`, and the optional `tools`, `workspace` and `persona`. |
+| `agents:` | Named agents: `provider`, `model`, and the optional `tools`, `workspace`, `persona` and `secrets` bindings. |
 | `personas:` | Named system prompts, each stored in its own directory (see below). |
 | `interaction:` | Which agent each interaction uses; `chat.agent` is the agent for `agent chat`. |
 | `webhooks:` | HTTP paths that trigger an agent: `path`, `agent`, plus the optional `secret` and `system_prompt`. |
@@ -137,6 +141,88 @@ the endpoint it calls. New features add their own section (see `Config` in
   are only available to agents that have one (see
   [Workspace sandbox](#workspace-sandbox)).
 - **`persona`**: a key into `personas:`.
+- **`secrets`**: optional purpose-to-secret bindings, e.g.
+  `secrets: {forgejo: forgejo_main}`. The Forgejo tools then use that secret
+  instead of the one found by host; its policy still applies.
+
+The agent learns where it is authenticated from a note appended to its system
+prompt (chat and webhooks alike). It lists, for each secret whose policy admits
+this agent and interaction, the allowed hosts and the agent's tools that may
+use it, and flags secrets that aren't set, need confirmation, or switch off
+after untrusted content. Secret names and values are never included. Secrets
+that need confirmation are left out for webhooks, which would deny them anyway.
+The listed hosts are visible to anything that can read the conversation,
+including injected prompts.
+
+### Secrets
+
+The model handles names; the harness resolves values inside trusted code at the
+last moment and scrubs everything flowing back toward the model or the logs.
+Config files hold references, never values:
+
+```yaml
+secrets:
+  forgejo_main:
+    source: env:FORGEJO_TOKEN        # or file:/path, or file:secrets/name (relative to home)
+    allow:
+      tools: [forgejo_pr, forgejo_pr_comment, forgejo_clone]
+      hosts: [git.example.com]       # host, or host:port
+      agents: [assistant]            # optional; omitted = any agent
+      interactions: [chat, webhook]  # optional; omitted = both
+    confirm: never                   # never | once-per-session | always
+    expires: 2027-01-01              # optional
+    deny_after_untrusted: false      # optional
+  openai:
+    source: env:OPENAI_API_KEY
+
+providers:
+  openai:
+    api_key: secret:openai           # $OPENAI_API_KEY works too (registered as env:OPENAI_API_KEY)
+```
+
+- **References.** A provider `api_key` and a webhook `secret` take
+  `secret:NAME` or `$NAME`. Either way the value is known to the redactor. A
+  `source` that isn't `env:` / `file:` is dropped with a warning (it is never
+  treated as a value), and a literal credential pasted into `api_key` or
+  `secret` (an `sk-…`/`ghp_…`-shaped or long random-looking string) is rejected.
+  Short literals like `dummy` still work for local servers.
+- **Policy.** Default deny: a secret without an `allow` block, or whose `allow`
+  lacks `tools` or `hosts`, is usable by no tool. Every listed condition must
+  hold. Provider and webhook references are implicitly allowed for their own
+  field. A denied tool call gets `use of secret 'x' was denied`, never the rule
+  that failed.
+- **`confirm`** asks on the terminal in an interactive chat. Webhooks (and
+  piped chats) can't answer, so anything but `never` denies them.
+- **`deny_after_untrusted`** denies the secret once untrusted content is in the
+  conversation: always for webhook runs (the payload), and in chat after
+  `forgejo_pr`, `forgejo_pr_diff`, `forgejo_issue` or `forgejo_issue_list`
+  returned a result. `/clear` resets it.
+- **Audit.** Each decision appends a line (time, secret, tool, host, agent,
+  interaction, allowed/denied and why) to `$LIGHT_HARNESS_HOME/secrets-audit.log`.
+  Values are never logged.
+- **Redaction.** Every registered value -- raw, base64, URL-encoded and
+  JSON-escaped -- is replaced with `[REDACTED:name]` in tool results, user
+  input (with a warning), assistant replies, session logs, the webhook output
+  log, and error messages. Before each model request the serialized payload is
+  scanned; if a value is still in it, the request is aborted
+  (`SecretLeakError`). Values shorter than 6 characters are not redacted.
+- **Workspaces.** A workspace overlapping `LIGHT_HARNESS_HOME` is rejected. One
+  that contains `./.env` or a `file:` secret prints a warning, and the file
+  tools refuse those files.
+
+```sh
+uv run agent secrets list            # sources, set/unset, policies; never values
+uv run agent secrets set forgejo_main  # hidden prompt (or stdin); writes <home>/secrets/forgejo_main (0600)
+```
+
+`agent secrets set` points `secrets.<name>.source` at the file it wrote and
+keeps the entry's policy; when the source changes, `config.yaml` is rewritten
+(as the web UI does, comments are not kept).
+
+Limits: redaction only catches registered values, so the policy is the primary
+control and redaction the fallback. Streamed reply tokens are shown as they
+arrive, before redaction. A tool that can send arbitrary data anywhere (a
+shell or fetch tool) would make any secret it is granted visible to the model.
 
 ### Personas
 
@@ -168,9 +254,10 @@ The tools refuse:
 - files over 10 MB.
 
 Writes are atomic. A workspace that contains, or is inside,
-`LIGHT_HARNESS_HOME` is rejected, because the home holds `config.yaml` with
-your keys. An invalid workspace disables the file tools and prints a
-`Config warning`.
+`LIGHT_HARNESS_HOME` is rejected, because the home holds `config.yaml` and the
+file-backed secrets. An invalid workspace disables the file tools and prints a
+`Config warning`. `./.env` and `file:` secrets are refused even inside a
+workspace.
 
 Everything else inside the workspace is reachable, so keep the workspace small.
 Agents that don't need to write should get `tools: [read_file]`.
@@ -179,7 +266,11 @@ Agents that don't need to write should get `tools: [read_file]`.
 
 These live in `src/light_harness/tools/forgejo/` and are available to every
 agent unless its `tools:` list leaves them out. Each call names the Forgejo
-instance to talk to. Tools that write or delete need an API `token`.
+instance to talk to. The API token is never an argument: the tool looks up the
+secret whose `allow.hosts` lists the instance's host (or the agent's
+`secrets.forgejo` binding) and checks its policy. Without a matching secret the
+call is anonymous, so tools that write or delete fail. With a token, redirects
+are not followed, so the header can't be forwarded to another host.
 
 How to address the target:
 
@@ -217,7 +308,7 @@ To set labels or assignees on a PR, use `forgejo_issue_update`.
 **Clone**
 
 `forgejo_clone` runs `git clone` of a repo into `path`. Optional arguments:
-`token`, `branch`, `depth`.
+`branch`, `depth`.
 
 - Like the file tools, it is only available to agents with a `workspace`.
 - `path` must resolve inside the workspace and must be missing or empty.
@@ -236,12 +327,19 @@ uv run agent webhooks --webui --webui-port 9000     # custom port
 uv run agent webhooks --webui --webui-host 0.0.0.0  # expose beyond localhost
 ```
 
-The sidebar has pages for **Providers**, **Agents**, **Personas**, **Chat** and
-**Webhooks**. The top bar shows the config path, with **Save** and **Refresh**
-buttons that apply to every page.
+The sidebar has pages for **Providers**, **Secrets**, **Agents**, **Personas**,
+**Chat** and **Webhooks**. The top bar shows the config path, with **Save** and
+**Refresh** buttons that apply to every page.
 
-- Saving writes back to `config.yaml` and keeps env refs (`$NAME`, `${NAME}`)
-  as written. Changes made on disk show up in the page automatically.
+- Saving writes back to `config.yaml` and keeps references (`$NAME`,
+  `${NAME}`, `secret:NAME`) as written. Changes made on disk show up in the
+  page automatically.
+- The page shows references and policies, never resolved values: every `/api`
+  response is redacted. A legacy literal `api_key` shows as `[REDACTED:…]` and
+  is kept as-is when saved back unchanged.
+- A value typed into a secret's **New value** field is written to
+  `$LIGHT_HARNESS_HOME/secrets/<name>` (mode 0600) via `POST /api/secret`, and
+  the secret's `source` is pointed at it. It never goes into `config.yaml`.
 - The persona field edits `personas/<name>/SOUL.md` directly. Other files in
   the persona's directory are left alone.
 - A save only rewrites the sections it names, and a request that names none is

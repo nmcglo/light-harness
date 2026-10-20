@@ -71,10 +71,12 @@ def test_home_env_file_supplies_the_api_key(home: Path) -> None:
     (home / "config.yaml").write_text(CONFIG, encoding="utf-8")
     (home / ".env").write_text("TEST_KEY=secret\n", encoding="utf-8")
     sent: list[list[ChatMessage]] = []
+    keys: list[object] = []
 
     class FakeClient:
-        def __init__(self, settings: object) -> None:
+        def __init__(self, settings: object, **_kwargs: object) -> None:
             self.api_key = getattr(settings, "api_key", None)
+            keys.append(self.api_key)
 
         async def chat(
             self, messages: list[ChatMessage], tools: list[dict] | None = None, on_token=None
@@ -91,7 +93,9 @@ def test_home_env_file_supplies_the_api_key(home: Path) -> None:
         result = runner.invoke(cli.app, ["chat", "hello"])
 
     assert result.exit_code == 0, result.output
-    assert "key=secret" in result.output
+    assert keys == ["secret"]
+    # A reply echoing the key is redacted before it is shown.
+    assert "key=[REDACTED:env:TEST_KEY]" in result.output
     assert sent and sent[0][-1].content == "hello"
 
 
@@ -109,7 +113,7 @@ def test_a_failed_one_shot_prompt_reports_an_error_and_exits_1(home: Path) -> No
     (home / ".env").write_text("TEST_KEY=secret\n", encoding="utf-8")
 
     class FailingClient:
-        def __init__(self, settings: object) -> None:
+        def __init__(self, settings: object, **_kwargs: object) -> None:
             pass
 
         async def chat(

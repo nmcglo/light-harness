@@ -2,7 +2,8 @@
 
 ``fetch_pr`` is the programmatic entry point; ``ForgejoPRTool`` wraps it as a
 :class:`Tool`. Both accept either ``instance_url`` + ``repo`` + ``pr_number`` or a
-full PR ``url`` (``https://host/owner/repo/pulls/N``), plus an optional API token.
+full PR ``url`` (``https://host/owner/repo/pulls/N``). The API token comes from the
+secret registry (see :class:`.common.ForgejoTool`).
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ...secrets import SecretValue
 from .common import (
     ForgejoError,
+    ForgejoTool,
     ensure_comment_belongs,
     positive_id,
     require_token,
@@ -64,7 +67,7 @@ async def _get(
     repo: str | None,
     pr_number: int | str | None,
     url: str | None,
-    token: str | None,
+    token: SecretValue | None,
     client: httpx.AsyncClient | None,
     timeout: float,
     suffix: str,
@@ -90,7 +93,7 @@ async def fetch_pr(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -114,7 +117,7 @@ async def fetch_pr_diff(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> str:
@@ -136,41 +139,40 @@ _PARAMETERS: dict[str, Any] = {
         },
         "repo": {"type": "string", "description": "Repository as 'owner/name'"},
         "pr_number": {"type": "integer"},
-        "token": {"type": "string", "description": "Optional API token"},
     },
 }
-_ARG_KEYS = ("instance_url", "repo", "pr_number", "url", "token")
+_ARG_KEYS = ("instance_url", "repo", "pr_number", "url")
 
 
-class ForgejoPRTool:
+class ForgejoPRTool(ForgejoTool):
     """Fetch a Forgejo pull request's details as JSON."""
 
     name = "forgejo_pr"
+    untrusted_output = True
     description = (
         "Fetch a Forgejo pull request's details (JSON) via the Forgejo API. Provide either "
-        "'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. "
-        "'token' is an optional API token."
+        "'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'."
     )
     parameters: dict[str, Any] = _PARAMETERS
 
     async def run(self, arguments: dict[str, Any]) -> str:
-        pr = await fetch_pr(**{k: arguments.get(k) for k in _ARG_KEYS})
+        pr = await fetch_pr(**self._args(arguments, _ARG_KEYS))
         return json.dumps(pr, indent=2)
 
 
-class ForgejoPRDiffTool:
+class ForgejoPRDiffTool(ForgejoTool):
     """Fetch a Forgejo pull request's unified diff as text."""
 
     name = "forgejo_pr_diff"
+    untrusted_output = True
     description = (
         "Fetch a Forgejo pull request's unified diff text via the Forgejo API. Provide either "
-        "'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. "
-        "'token' is an optional API token."
+        "'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'."
     )
     parameters: dict[str, Any] = _PARAMETERS
 
     async def run(self, arguments: dict[str, Any]) -> str:
-        return await fetch_pr_diff(**{k: arguments.get(k) for k in _ARG_KEYS})
+        return await fetch_pr_diff(**self._args(arguments, _ARG_KEYS))
 
 
 async def post_pr_comment(
@@ -180,7 +182,7 @@ async def post_pr_comment(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -188,8 +190,7 @@ async def post_pr_comment(
     created comment's JSON. Forgejo requires a token with write access to issues."""
     if not isinstance(body, str) or not body.strip():
         raise ForgejoError("comment body must be a non-empty string")
-    if not token:
-        raise ForgejoError("posting a comment requires an API token")
+    token = require_token(token, "posting a comment")
     response = await _get(
         instance_url=instance_url, repo=repo, pr_number=pr_number, url=url, token=token,
         client=client, timeout=timeout, suffix="/comments", accept="application/json",
@@ -204,14 +205,14 @@ async def post_pr_comment(
     return data
 
 
-class ForgejoPRCommentTool:
+class ForgejoPRCommentTool(ForgejoTool):
     """Post a comment on a Forgejo pull request."""
 
     name = "forgejo_pr_comment"
     description = (
         "Post a comment on a Forgejo pull request via the Forgejo API and return the created "
         "comment (JSON). Provide 'body' plus either 'url' (full PR URL) or 'instance_url' + "
-        "'repo' ('owner/name') + 'pr_number'. 'token' (API token) is required."
+        "'repo' ('owner/name') + 'pr_number'."
     )
     parameters: dict[str, Any] = {
         **_PARAMETERS,
@@ -219,12 +220,12 @@ class ForgejoPRCommentTool:
             **_PARAMETERS["properties"],
             "body": {"type": "string", "description": "Comment text (Markdown)"},
         },
-        "required": ["body", "token"],
+        "required": ["body"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         comment = await post_pr_comment(
-            body=arguments.get("body") or "", **{k: arguments.get(k) for k in _ARG_KEYS}
+            body=arguments.get("body") or "", **self._args(arguments, _ARG_KEYS)
         )
         return json.dumps(comment, indent=2)
 
@@ -268,7 +269,7 @@ async def submit_pr_review(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -290,8 +291,7 @@ async def submit_pr_review(
     inline = [_review_comment(c, i) for i, c in enumerate(comments or [])]
     if normalized != "APPROVED" and not body.strip() and not inline:
         raise ForgejoError(f"a {normalized} review needs a body or at least one inline comment")
-    if not token:
-        raise ForgejoError("submitting a review requires an API token")
+    token = require_token(token, "submitting a review")
     payload: dict[str, Any] = {"event": normalized, "body": body}
     if inline:
         payload["comments"] = inline
@@ -311,7 +311,7 @@ async def submit_pr_review(
     return data
 
 
-class ForgejoPRReviewTool:
+class ForgejoPRReviewTool(ForgejoTool):
     """Submit a review (approve / request changes / comment) on a Forgejo pull request."""
 
     name = "forgejo_pr_review"
@@ -321,8 +321,7 @@ class ForgejoPRReviewTool:
         "inline comments on specific lines: each has 'path', 'body' and 'new_line' (line number "
         "in the new file, for added/context lines) and/or 'old_line' (line number in the old "
         "file, for removed lines). Optional 'commit_id' pins the head commit SHA. Provide either "
-        "'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. "
-        "'token' (API token) is required."
+        "'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'."
     )
     parameters: dict[str, Any] = {
         **_PARAMETERS,
@@ -345,7 +344,7 @@ class ForgejoPRReviewTool:
                 },
             },
         },
-        "required": ["event", "token"],
+        "required": ["event"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
@@ -354,7 +353,7 @@ class ForgejoPRReviewTool:
             body=arguments.get("body") or "",
             comments=arguments.get("comments"),
             commit_id=arguments.get("commit_id"),
-            **{k: arguments.get(k) for k in _ARG_KEYS},
+            **self._args(arguments, _ARG_KEYS),
         )
         return json.dumps(review, indent=2)
 
@@ -366,7 +365,7 @@ async def delete_pr_comment(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -393,7 +392,7 @@ async def delete_pr_review(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -410,7 +409,7 @@ async def delete_pr_review(
     return {"deleted": True, "review_id": rid, "pr_number": number}
 
 
-class ForgejoPRCommentDeleteTool:
+class ForgejoPRCommentDeleteTool(ForgejoTool):
     """Delete a comment from a Forgejo pull request."""
 
     name = "forgejo_pr_comment_delete"
@@ -419,7 +418,7 @@ class ForgejoPRCommentDeleteTool:
         "'comment_id' is the comment's numeric id (the 'id' returned by forgejo_pr_comment, "
         "or the number in '#issuecomment-N' of its link); it must belong to the named PR. "
         "Provide either 'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + "
-        "'pr_number'. 'token' (API token) is required."
+        "'pr_number'."
     )
     parameters: dict[str, Any] = {
         **_PARAMETERS,
@@ -427,17 +426,17 @@ class ForgejoPRCommentDeleteTool:
             **_PARAMETERS["properties"],
             "comment_id": {"type": "integer", "description": "Numeric comment id"},
         },
-        "required": ["comment_id", "token"],
+        "required": ["comment_id"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         result = await delete_pr_comment(
-            comment_id=arguments.get("comment_id"), **{k: arguments.get(k) for k in _ARG_KEYS}
+            comment_id=arguments.get("comment_id"), **self._args(arguments, _ARG_KEYS)
         )
         return json.dumps(result)
 
 
-class ForgejoPRReviewDeleteTool:
+class ForgejoPRReviewDeleteTool(ForgejoTool):
     """Delete a review from a Forgejo pull request."""
 
     name = "forgejo_pr_review_delete"
@@ -445,7 +444,7 @@ class ForgejoPRReviewDeleteTool:
         "Delete a review from a Forgejo pull request via the Forgejo API (irreversible; "
         "its inline comments are removed too). 'review_id' is the review's numeric id "
         "(the 'id' returned by forgejo_pr_review). Provide either 'url' (full PR URL) or "
-        "'instance_url' + 'repo' ('owner/name') + 'pr_number'. 'token' (API token) is required."
+        "'instance_url' + 'repo' ('owner/name') + 'pr_number'."
     )
     parameters: dict[str, Any] = {
         **_PARAMETERS,
@@ -453,12 +452,12 @@ class ForgejoPRReviewDeleteTool:
             **_PARAMETERS["properties"],
             "review_id": {"type": "integer", "description": "Numeric review id"},
         },
-        "required": ["review_id", "token"],
+        "required": ["review_id"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         result = await delete_pr_review(
-            review_id=arguments.get("review_id"), **{k: arguments.get(k) for k in _ARG_KEYS}
+            review_id=arguments.get("review_id"), **self._args(arguments, _ARG_KEYS)
         )
         return json.dumps(result)
 
@@ -471,7 +470,7 @@ async def edit_pr_comment(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -495,7 +494,7 @@ async def edit_pr_comment(
     return data
 
 
-class ForgejoPRCommentEditTool:
+class ForgejoPRCommentEditTool(ForgejoTool):
     """Edit a comment on a Forgejo pull request."""
 
     name = "forgejo_pr_comment_edit"
@@ -504,8 +503,8 @@ class ForgejoPRCommentEditTool:
         "comment (JSON). 'comment_id' is the comment's numeric id (the 'id' returned by "
         "forgejo_pr_comment, or the number in '#issuecomment-N' of its link); it must belong "
         "to the named PR. 'body' is the new text (Markdown). Provide either 'url' (full PR "
-        "URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. 'token' (API token) "
-        "is required, and must be allowed to edit that comment."
+        "URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. The "
+        "configured token must be allowed to edit that comment."
     )
     parameters: dict[str, Any] = {
         **_PARAMETERS,
@@ -514,14 +513,14 @@ class ForgejoPRCommentEditTool:
             "comment_id": {"type": "integer", "description": "Numeric comment id"},
             "body": {"type": "string", "description": "New comment text (Markdown)"},
         },
-        "required": ["comment_id", "body", "token"],
+        "required": ["comment_id", "body"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         comment = await edit_pr_comment(
             comment_id=arguments.get("comment_id"),
             body=arguments.get("body") or "",
-            **{k: arguments.get(k) for k in _ARG_KEYS},
+            **self._args(arguments, _ARG_KEYS),
         )
         return json.dumps(comment, indent=2)
 
@@ -548,7 +547,7 @@ async def create_pr(
     instance_url: str | None = None,
     repo: str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -583,7 +582,7 @@ async def close_pr(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -609,7 +608,7 @@ async def merge_pr(
     repo: str | None = None,
     pr_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -646,7 +645,7 @@ async def merge_pr(
     }
 
 
-class ForgejoPRCreateTool:
+class ForgejoPRCreateTool(ForgejoTool):
     """Open a pull request in a Forgejo repository."""
 
     name = "forgejo_pr_create"
@@ -656,7 +655,7 @@ class ForgejoPRCreateTool:
         "into (the repo's default branch if omitted); 'title' is required, 'body' (Markdown) "
         "optional. Labels and assignees can be set afterwards with forgejo_issue_update. "
         "Provide either 'url' (repo URL, https://host/owner/repo) or 'instance_url' + 'repo' "
-        "('owner/name'). 'token' (API token) is required."
+        "('owner/name')."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -664,13 +663,12 @@ class ForgejoPRCreateTool:
             "url": {"type": "string", "description": "Repo URL, e.g. https://host/owner/repo"},
             "instance_url": _PARAMETERS["properties"]["instance_url"],
             "repo": _PARAMETERS["properties"]["repo"],
-            "token": {"type": "string", "description": "API token"},
             "title": {"type": "string"},
             "head": {"type": "string", "description": "Branch to merge, or 'user:branch'"},
             "base": {"type": "string", "description": "Target branch (default: repo default)"},
             "body": {"type": "string", "description": "PR description (Markdown)"},
         },
-        "required": ["title", "head", "token"],
+        "required": ["title", "head"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
@@ -679,28 +677,27 @@ class ForgejoPRCreateTool:
             head=arguments.get("head") or "",
             base=arguments.get("base"),
             body=arguments.get("body") or "",
-            **{k: arguments.get(k) for k in ("instance_url", "repo", "url", "token")},
+            **self._args(arguments, ("instance_url", "repo", "url")),
         )
         return json.dumps(pr, indent=2)
 
 
-class ForgejoPRCloseTool:
+class ForgejoPRCloseTool(ForgejoTool):
     """Close a Forgejo pull request without merging it."""
 
     name = "forgejo_pr_close"
     description = (
         "Close a Forgejo pull request WITHOUT merging it and return the PR (JSON). Provide "
-        "either 'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. "
-        "'token' (API token) is required."
+        "either 'url' (full PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'."
     )
-    parameters: dict[str, Any] = {**_PARAMETERS, "required": ["token"]}
+    parameters: dict[str, Any] = _PARAMETERS
 
     async def run(self, arguments: dict[str, Any]) -> str:
-        pr = await close_pr(**{k: arguments.get(k) for k in _ARG_KEYS})
+        pr = await close_pr(**self._args(arguments, _ARG_KEYS))
         return json.dumps(pr, indent=2)
 
 
-class ForgejoPRMergeTool:
+class ForgejoPRMergeTool(ForgejoTool):
     """Merge a Forgejo pull request."""
 
     name = "forgejo_pr_merge"
@@ -711,8 +708,7 @@ class ForgejoPRMergeTool:
         "afterwards; 'head_commit_id' makes the merge fail unless the PR head is still that "
         "commit. Fails if the PR is not mergeable (conflicts, failing checks, required "
         "approvals). Returns merged, state and merge_commit_sha. Provide either 'url' (full "
-        "PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'. 'token' (API "
-        "token) is required."
+        "PR URL) or 'instance_url' + 'repo' ('owner/name') + 'pr_number'."
     )
     parameters: dict[str, Any] = {
         **_PARAMETERS,
@@ -724,7 +720,6 @@ class ForgejoPRMergeTool:
             "delete_branch": {"type": "boolean", "description": "Delete the head branch after"},
             "head_commit_id": {"type": "string", "description": "Required head commit SHA"},
         },
-        "required": ["token"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
@@ -734,6 +729,6 @@ class ForgejoPRMergeTool:
             message=arguments.get("message"),
             delete_branch=bool(arguments.get("delete_branch")),
             head_commit_id=arguments.get("head_commit_id"),
-            **{k: arguments.get(k) for k in _ARG_KEYS},
+            **self._args(arguments, _ARG_KEYS),
         )
         return json.dumps(result, indent=2)

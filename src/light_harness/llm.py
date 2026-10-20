@@ -16,6 +16,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .secrets import Redactor
 
 
 class ToolCall(BaseModel):
@@ -157,16 +158,24 @@ def _tool_call_fields(raw: Any) -> tuple[str, str, Any]:
 
 
 class OpenAICompatibleClient:
-    """Default client: posts to ``{base_url}/chat/completions``."""
+    """Default client: posts to ``{base_url}/chat/completions``.
+
+    With a ``guard``, every request body is scanned for registered secret values
+    before it is sent; one found aborts the call with
+    :class:`~light_harness.secrets.SecretLeakError` (the backstop behind the
+    redaction of tool results). The provider's own ``Authorization`` header is
+    not part of the scanned body."""
 
     def __init__(
         self,
         settings: Settings,
         client: httpx.AsyncClient | None = None,
         retry_delay: float = 0.5,
+        guard: Redactor | None = None,
     ) -> None:
         self._settings = settings
         self._retry_delay = retry_delay
+        self._guard = guard
         self._client = client or httpx.AsyncClient(
             base_url=settings.base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {settings.api_key}"},
@@ -184,6 +193,8 @@ class OpenAICompatibleClient:
         """POST the chat request, retrying transient failures (connection errors,
         429 and 5xx) with exponential backoff; other HTTP errors raise at once.
         With ``stream`` the body is left unread and the caller must close it."""
+        if self._guard is not None:
+            self._guard.guard(json.dumps(payload))
         for attempt in range(_MAX_ATTEMPTS):
             last = attempt == _MAX_ATTEMPTS - 1
             try:

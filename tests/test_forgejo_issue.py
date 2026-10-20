@@ -9,6 +9,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
+from light_harness.secrets import SecretValue
 from light_harness.tools.forgejo.common import ForgejoError
 from light_harness.tools.forgejo.issue import (
     create_issue,
@@ -18,7 +19,7 @@ from light_harness.tools.forgejo.issue import (
     update_issue,
 )
 
-REPO = {"instance_url": "https://forge.test", "repo": "o/r", "token": "tok"}
+REPO = {"instance_url": "https://forge.test", "repo": "o/r", "token": SecretValue("forgejo", "tok")}
 API = "https://forge.test/api/v1/repos/o/r"
 LABELS = [{"id": 11, "name": "bug"}, {"id": 12, "name": "docs"}]
 ISSUE = {"number": 3, "title": "t", "state": "open", "labels": [], "assignees": []}

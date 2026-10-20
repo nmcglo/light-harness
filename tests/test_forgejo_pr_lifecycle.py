@@ -8,9 +8,10 @@ import json
 import httpx
 import pytest
 
+from light_harness.secrets import SecretValue
 from light_harness.tools.forgejo.pr import ForgejoError, close_pr, create_pr, merge_pr
 
-REPO = {"instance_url": "https://forge.test", "repo": "o/r", "token": "tok"}
+REPO = {"instance_url": "https://forge.test", "repo": "o/r", "token": SecretValue("forgejo", "tok")}
 API = "/api/v1/repos/o/r"
 PR = {"number": 9, "state": "closed", "merged": True, "merge_commit_sha": "abc", "html_url": "u"}
 

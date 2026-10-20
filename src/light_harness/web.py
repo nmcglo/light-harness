@@ -3,10 +3,17 @@
 Built on ``http.server`` (standard library only -- no extra dependencies). The
 UI presents the config as a structured form (a providers list plus the agent
 section) and writes it back to ``config.yaml`` as YAML. Values are stored
-verbatim, so ``$NAME`` / ``${NAME}`` references round-trip intact (they are not
-resolved here). The UI only touches the file on disk: a running ``agent chat``
-session keeps the config it loaded at start, so edits apply to the *next*
-session, not the current one.
+verbatim, so ``$NAME`` / ``${NAME}`` and ``secret:NAME`` references round-trip
+intact (they are not resolved here). The UI only touches the file on disk: a
+running ``agent chat`` session keeps the config it loaded at start, so edits
+apply to the *next* session, not the current one.
+
+Secrets: the UI shows and edits references and policies (the ``secrets:``
+section), never resolved values. A value typed into a secret card is written to
+the file backend (``<home>/secrets/<name>``) via ``POST /api/secret``, not to
+``config.yaml``. Every ``/api`` response is passed through a redactor holding the
+known secret values; a legacy literal ``api_key`` / webhook ``secret`` is shown
+as ``[REDACTED:...]`` and kept as-is on save while that placeholder is sent back.
 
 A persona's prompt is the one value that does not live in the config file: the
 config's ``SOUL.md`` entry only *seeds* ``personas/<name>/SOUL.md``, and the
@@ -21,24 +28,24 @@ Endpoints:
                            is not UTF-8 gets a 500 ``{"error"}`` instead)
 - ``GET  /api/tools``   -> ``{"tools": [...], "forgejo_tools": [...]}`` (core and Forgejo
                            tool names)
-- ``POST /api/config``  -> JSON body naming any of ``providers``, ``agents``,
-                           ``personas``, ``interaction``, ``webhooks``; only the sections the
-                           body sends are rewritten (as YAML), the others are kept
-                           exactly as they are on disk, and a persona entry that
-                           sends ``SOUL.md`` rewrites that persona's file
+- ``POST /api/config``  -> JSON body naming any of ``secrets``, ``providers``,
+                           ``agents``, ``personas``, ``interaction``, ``webhooks``; only
+                           the sections the body sends are rewritten (as YAML), the
+                           others are kept exactly as they are on disk, and a persona
+                           entry that sends ``SOUL.md`` rewrites that persona's file
+- ``POST /api/secret``  -> ``{"name", "value"}``: store the value in the file backend
+                           and point ``secrets.<name>.source`` at it; answers
+                           ``{"ok", "source"}`` (never the value)
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import re
 import secrets
-import tempfile
 from collections.abc import Sequence
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -47,10 +54,13 @@ from .config import (
     SOUL_FILENAME,
     config_file_path,
     has_env_reference,
+    known_secret_values,
     load_yaml,
     persona_dir,
     persona_soul_text,
     resolve_env,
+    store_secret_value,
+    write_config_text,
     write_persona_soul,
 )
 from .httputil import (
@@ -60,6 +70,13 @@ from .httputil import (
     host_is_allowed,
     read_body,
     secret_matches,
+)
+from .secrets import (
+    REFERENCE_PREFIX,
+    SECRET_NAME_RE,
+    Redactor,
+    looks_like_secret,
+    parse_source,
 )
 from .tools.builtin import CORE_TOOL_NAMES
 from .tools.forgejo import FORGEJO_TOOL_NAMES
@@ -174,6 +191,7 @@ _PAGE_BODY = """<body>
     <div class="brand">light-harness</div>
     <nav class="nav">
       <a href="#providers" data-page="providers">Providers</a>
+      <a href="#secrets" data-page="secrets">Secrets</a>
       <a href="#agents" data-page="agents">Agents</a>
       <a href="#personas" data-page="personas">Personas</a>
       <a href="#chat" data-page="chat">Chat</a>
@@ -198,6 +216,19 @@ _PAGE_BODY = """<body>
         <button id="add-provider" class="ghost" type="button">+ Add provider</button>
       </div>
       <div id="provider-list"></div>
+    </section>
+    <section class="section page" id="page-secrets">
+      <div class="section-head">
+        <h2>Secrets</h2>
+        <button id="add-secret" class="ghost" type="button">+ Add secret</button>
+      </div>
+      <div class="card" style="margin-bottom:18px;font-size:13px;color:var(--muted)">
+        A secret is a reference (<code>env:NAME</code> or <code>file:PATH</code>) plus who
+        may use it. Tools need both <b>tools</b> and <b>hosts</b> listed; reference a secret
+        from a provider or webhook as <code>secret:NAME</code>. A value typed here is written
+        to <code>secrets/&lt;name&gt;</code> under the harness home, never to the config
+        file, and is never shown again.</div>
+      <div id="secret-list"></div>
     </section>
     <section class="section page" id="page-agents">
       <div class="section-head">
@@ -268,6 +299,8 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   var wsHosts = document.getElementById("ws-hosts");
   var wsOutputLog = document.getElementById("ws-output-log");
   var webhookList = document.getElementById("webhook-list");
+  var secretList = document.getElementById("secret-list");
+  var addSecretBtn = document.getElementById("add-secret");
   var addWebhookBtn = document.getElementById("add-webhook");
 
   function esc(v) {
@@ -311,7 +344,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     h.push('</div>');
     h.push('<div class="grid three">');
     h.push(field("Base URL", "prov-base_url", p.base_url || "", "http://127.0.0.1:8000/v1"));
-    h.push(field("API key", "prov-api_key", p.api_key || "", "$MY_API_KEY"));
+    h.push(field("API key (reference)", "prov-api_key", p.api_key || "", "secret:openai"));
     h.push(field("Timeout (s)", "prov-timeout", p.timeout == null ? "" : p.timeout, "60"));
     h.push('</div>');
     h.push('<div class="models">');
@@ -415,7 +448,54 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     h.push(field("Workspace (absolute directory; required for the file tools)",
       "agent-workspace", a.workspace || "", "/path/to/project"));
     h.push(toolsBlock(a.tools));
+    var bindings = a.secrets || {};
+    h.push(field("Secret bindings (purpose=secret, comma-separated)", "agent-secrets",
+      Object.keys(bindings).map(function (k) { return k + "=" + bindings[k]; }).join(", "),
+      "forgejo=forgejo_main"));
     h.push("</div>");
+    return h.join("");
+  }
+
+  function csv(list) { return Array.isArray(list) ? list.join(", ") : ""; }
+  function splitCsv(text) {
+    return text.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+
+  function secretCard(name, s) {
+    s = s || {};
+    var allow = s.allow || {};
+    var confirm = s.confirm || "never";
+    var h = [];
+    h.push('<div class="card secret" data-secret>');
+    h.push('<div class="prov-head">');
+    h.push('<input class="secret-name" value="' + esc(name) + '" placeholder="secret name">');
+    h.push('<button class="icon remove-secret" type="button" title="Remove secret">&times;' +
+      '</button>');
+    h.push('</div>');
+    h.push('<div class="grid two">');
+    h.push(field("Source (env:NAME or file:PATH)", "secret-source", s.source || "",
+      "env:FORGEJO_TOKEN"));
+    h.push('<label><span>New value (optional; stored in the file backend)</span>' +
+      '<input class="secret-value" type="password" autocomplete="new-password" value=""' +
+      ' placeholder="leave empty to keep"></label>');
+    h.push(field("Allowed tools", "secret-tools", csv(allow.tools), "forgejo_pr, forgejo_clone"));
+    h.push(field("Allowed hosts", "secret-hosts", csv(allow.hosts), "git.example.com"));
+    h.push(field("Allowed agents (empty = any)", "secret-agents", csv(allow.agents), "assistant"));
+    h.push(field("Allowed interactions (empty = any)", "secret-interactions",
+      csv(allow.interactions), "chat, webhook"));
+    h.push('<label><span>Confirm (chat only; webhooks are denied)</span>' +
+      '<select class="secret-confirm">' +
+      ["never", "once-per-session", "always"].map(function (m) {
+        return '<option value="' + m + '"' + (m === confirm ? " selected" : "") + ">" + m +
+          "</option>";
+      }).join("") + "</select></label>");
+    h.push(field("Expires (YYYY-MM-DD, optional)", "secret-expires", s.expires || "",
+      "2027-01-01"));
+    h.push('</div>');
+    h.push('<label class="server-check"><input type="checkbox" class="secret-untrusted"' +
+      (s.deny_after_untrusted ? " checked" : "") + "> Deny once untrusted content " +
+      "(webhook payloads, fetched issues/PRs) is in the conversation</label>");
+    h.push('</div>');
     return h.join("");
   }
 
@@ -457,8 +537,8 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     h.push('<div class="grid two">');
     h.push('<label><span>Agent</span><select class="webhook-agent">' +
       agentOptions(w.agent || "") + "</select></label>");
-    h.push(field("Secret (bearer token; empty = unauthenticated)", "webhook-secret",
-      w.secret || "", "$MY_WEBHOOK_SECRET"));
+    h.push(field("Secret (reference to the bearer token; empty = unauthenticated)",
+      "webhook-secret", w.secret || "", "secret:hook_token"));
     h.push('</div>');
     h.push('<label><span>System prompt (optional; overrides the default agent prompt)</span>' +
       '<textarea class="webhook-prompt" placeholder="You are ...">' +
@@ -505,6 +585,11 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     personaList.innerHTML = personaNames.length
       ? personaNames.map(function (n) { return personaCard(n, personas[n]); }).join("")
       : '<p class="empty">No personas defined. Add one to customize an agent.</p>';
+    var secretsData = state.data.secrets || {};
+    var secretNames = Object.keys(secretsData);
+    secretList.innerHTML = secretNames.length
+      ? secretNames.map(function (n) { return secretCard(n, secretsData[n]); }).join("")
+      : '<p class="empty">No secrets defined. Add one to give tools a credential.</p>';
     var agents = state.data.agents || [];
     agentList.innerHTML = agents.length
       ? agents.map(function (a) { return agentCard(a); }).join("")
@@ -575,9 +660,56 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
         model: (card.querySelector(".agent-model") || {}).value.trim(),
         persona: (card.querySelector(".agent-persona") || {}).value || "",
         workspace: ((card.querySelector(".agent-workspace") || {}).value || "").trim(),
-        tools: tools
+        tools: tools,
+        secrets: splitCsv((card.querySelector(".agent-secrets") || {}).value || "")
+          .reduce(function (acc, pair) {
+            var i = pair.indexOf("=");
+            if (i > 0) acc[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+            return acc;
+          }, {})
       };
     });
+  }
+
+  function secretCards() {
+    return Array.from(secretList.querySelectorAll("[data-secret]"));
+  }
+
+  function collectSecrets() {
+    return secretCards().map(function (card) {
+      var name = card.querySelector(".secret-name").value.trim();
+      var source = card.querySelector(".secret-source").value.trim();
+      // A value typed for a secret without a source goes to the file backend.
+      if (!source && card.querySelector(".secret-value").value) {
+        source = "file:secrets/" + name;
+      }
+      return {
+        name: name,
+        source: source,
+        tools: splitCsv(card.querySelector(".secret-tools").value),
+        hosts: splitCsv(card.querySelector(".secret-hosts").value),
+        agents: splitCsv(card.querySelector(".secret-agents").value),
+        interactions: splitCsv(card.querySelector(".secret-interactions").value),
+        confirm: card.querySelector(".secret-confirm").value,
+        expires: card.querySelector(".secret-expires").value.trim(),
+        deny_after_untrusted: card.querySelector(".secret-untrusted").checked
+      };
+    });
+  }
+
+  async function storeSecretValues() {
+    for (const card of secretCards()) {
+      var input = card.querySelector(".secret-value");
+      if (!input.value) continue;
+      var res = await apiFetch("/api/secret", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: card.querySelector(".secret-name").value.trim(),
+          value: input.value })
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+      input.value = "";
+    }
   }
 
   function collectPersonas() {
@@ -642,6 +774,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
     deriveStatus();
     try {
       var body = JSON.stringify({
+        secrets: collectSecrets(),
         providers: collectProviders(),
         agents: collectAgents(),
         personas: collectPersonas(),
@@ -654,6 +787,7 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
       });
       var data = await res.json();
       if (res.ok) {
+        await storeSecretValues();
         state.dirty = false;
         state.fileDirty = false;
         await fetchConfig();
@@ -734,6 +868,20 @@ _PAGE_JS = """  var state = { data: null, builtinTools: [], dirty: false, fileDi
   });
 
   interactionSection.addEventListener("change", markDirty);
+
+  secretList.addEventListener("click", function (e) {
+    if (e.target.classList.contains("remove-secret")) {
+      e.target.closest("[data-secret]").remove(); markDirty();
+    }
+  });
+  secretList.addEventListener("input", markDirty);
+  secretList.addEventListener("change", markDirty);
+  addSecretBtn.addEventListener("click", function () {
+    var empty = secretList.querySelector(".empty");
+    if (empty) empty.remove();
+    secretList.insertAdjacentHTML("beforeend", secretCard("", {}));
+    markDirty();
+  });
 
   webhookList.addEventListener("click", function (e) {
     if (e.target.classList.contains("remove-webhook")) {
@@ -819,6 +967,7 @@ def _yaml_number(text: str) -> int | float | str | None:
 
 
 _MANAGED_SECTIONS: tuple[str, ...] = (
+    "secrets",
     "providers",
     "agents",
     "personas",
@@ -932,6 +1081,15 @@ def _agents_from_form(raw: Any) -> list[dict[str, Any]]:
         if entry.get("tools") is not None:
             # ``[]`` means "no tools"; an absent key means the built-in default.
             agent["tools"] = _form_names(entry["tools"], f"agents.{name}.tools")
+        bindings = entry.get("secrets")
+        if bindings is not None:
+            if not isinstance(bindings, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in bindings.items()
+            ):
+                raise ValueError(f"agents.{name}.secrets: expected an object of purpose: name.")
+            cleaned = {k.strip(): v.strip() for k, v in bindings.items() if k.strip() and v.strip()}
+            if cleaned:
+                agent["secrets"] = cleaned
         agents.append(agent)
     return agents
 
@@ -1094,8 +1252,118 @@ def _webhooks_from_form(raw: Any) -> list[dict[str, Any]]:
     return webhooks
 
 
+_CONFIRM_MODES = ("never", "once-per-session", "always")
+_POLICY_LISTS = ("tools", "hosts", "agents", "interactions")
+
+
+def _secrets_from_form(raw: Any) -> dict[str, Any]:
+    """Build the file's ``secrets:`` mapping from the form's secret list. Only
+    references are accepted as ``source``: a value goes through ``/api/secret``."""
+    out: dict[str, Any] = {}
+    for index, any_entry in enumerate(_form_entries(raw, "secrets")):
+        entry = _form_entry(any_entry, "secrets", index)
+        name = _form_name(entry, "secrets", index)
+        where = f"secrets.{name}"
+        if not SECRET_NAME_RE.fullmatch(name):
+            raise ValueError(f"{where}: names use letters, digits, '_' and '-'.")
+        if name in out:
+            raise ValueError(f"secrets[{index}]: duplicate name {name!r}.")
+        source = _form_text(entry, "source", where)
+        if parse_source(source) is None:
+            raise ValueError(
+                f"{where}.source: expected env:NAME or file:PATH (set a value with the "
+                "secret's value field instead of typing it here)."
+            )
+        spec: dict[str, Any] = {"source": source}
+        allow: dict[str, Any] = {}
+        for key in _POLICY_LISTS:
+            if entry.get(key) is not None:
+                names = _form_names(entry[key], f"{where}.{key}")
+                if key == "interactions" and set(names) - {"chat", "webhook"}:
+                    raise ValueError(f"{where}.interactions: only chat and webhook exist.")
+                if names:
+                    allow[key] = names
+        if allow:
+            spec["allow"] = allow
+        confirm = _form_text(entry, "confirm", where)
+        if confirm and confirm not in _CONFIRM_MODES:
+            raise ValueError(f"{where}.confirm: expected one of {', '.join(_CONFIRM_MODES)}.")
+        if confirm and confirm != "never":
+            spec["confirm"] = confirm
+        expires = _form_text(entry, "expires", where)
+        if expires:
+            try:
+                date.fromisoformat(expires)
+            except ValueError:
+                raise ValueError(f"{where}.expires: expected a date (YYYY-MM-DD).") from None
+            spec["expires"] = expires
+        if entry.get("deny_after_untrusted") is True:
+            spec["deny_after_untrusted"] = True
+        out[name] = spec
+    return out
+
+
+_PLACEHOLDER = "[REDACTED:"
+
+
+def _credential_fields(data: dict[str, Any]) -> list[tuple[str, dict[str, Any], str]]:
+    """``(label, container, key)`` for each provider ``api_key`` and webhook
+    ``secret`` in a config mapping."""
+    fields: list[tuple[str, dict[str, Any], str]] = []
+    providers = data.get("providers")
+    if isinstance(providers, dict):
+        for name, spec in providers.items():
+            if isinstance(spec, dict) and isinstance(spec.get("api_key"), str):
+                fields.append((f"providers.{name}.api_key", spec, "api_key"))
+    webhooks = data.get("webhooks")
+    if isinstance(webhooks, list):
+        for entry in webhooks:
+            if isinstance(entry, dict) and isinstance(entry.get("secret"), str):
+                fields.append((f"webhooks.{entry.get('path')}.secret", entry, "secret"))
+    return fields
+
+
+def _is_reference(value: str) -> bool:
+    text = value.strip()
+    return not text or text.startswith(REFERENCE_PREFIX) or has_env_reference(text)
+
+
+def _literal_credentials(data: dict[str, Any]) -> dict[str, str]:
+    """Credential fields of ``data`` holding a literal (legacy) value, by label."""
+    return {
+        label: container[key]
+        for label, container, key in _credential_fields(data)
+        if not _is_reference(container[key])
+    }
+
+
+def _check_credentials(data: dict[str, Any], current: dict[str, Any]) -> None:
+    """Put back literal values the GET redacted (a ``[REDACTED:...]`` field sent
+    unchanged), and refuse new literals that look like credentials."""
+    old = _literal_credentials(current)
+    for label, container, key in _credential_fields(data):
+        value = container[key]
+        if value.startswith(_PLACEHOLDER):
+            if label not in old:
+                raise ValueError(f"{label}: enter a reference (secret:NAME or $NAME).")
+            container[key] = old[label]
+        elif not _is_reference(value) and value != old.get(label) and looks_like_secret(value):
+            raise ValueError(
+                f"{label}: looks like a literal credential; add it as a secret and "
+                "reference it as secret:NAME."
+            )
+
+
+def _response_redactor(current: dict[str, Any]) -> Redactor:
+    """A redactor for ``/api`` responses: every value the config references plus
+    literal credentials still in the file."""
+    return Redactor({**_literal_credentials(current), **known_secret_values(current)})
+
+
 def _build_section(section: str, raw: Any, current: Any) -> Any:
     """Build one managed section from the body's value for it."""
+    if section == "secrets":
+        return _secrets_from_form(raw)
     if section == "providers":
         return _providers_from_form(raw)
     if section == "agents":
@@ -1112,8 +1380,8 @@ def _build_section(section: str, raw: Any, current: Any) -> Any:
 def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """Build the config mapping from the form JSON.
 
-    The form manages ``providers``, ``agents``, ``personas``, ``interaction`` and
-    ``webhooks``.
+    The form manages ``secrets``, ``providers``, ``agents``, ``personas``,
+    ``interaction``, ``webhooks`` and ``webhook_server``.
     A managed section is rewritten only when the body *sends* it: a section that
     is absent (or ``null``) is carried over exactly as it is on disk, so a body
     that touches one section can never wipe the others, and a body that sends no
@@ -1124,7 +1392,7 @@ def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict
     """
     if not any(_section_sent(payload, section) for section in _MANAGED_SECTIONS):
         raise ValueError(
-            "Nothing to save: the body must send at least one of providers, "
+            "Nothing to save: the body must send at least one of secrets, providers, "
             "agents, personas, interaction or webhooks."
         )
 
@@ -1145,23 +1413,8 @@ def _build_config_dict(payload: dict[str, Any], current: dict[str, Any]) -> dict
         if key not in _MANAGED_SECTIONS:
             data[key] = value
 
+    _check_credentials(data, current)
     return data
-
-
-def _write_config_text(text: str) -> Path:
-    """Atomically write ``text`` to the config file and return its path."""
-    path = config_file_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-    return path
 
 
 class ConfigHandler(BaseHTTPRequestHandler):
@@ -1227,7 +1480,8 @@ class ConfigHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._guard(api=True):
             return
-        if self.path.split("?", 1)[0] != "/api/config":
+        route = self.path.split("?", 1)[0]
+        if route not in ("/api/config", "/api/secret"):
             self._reject(404, {"error": "not found"})
             return
         try:
@@ -1245,6 +1499,9 @@ class ConfigHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             self._send_json(400, {"ok": False, "error": "Body must be a JSON object."})
             return
+        if route == "/api/secret":
+            self._handle_post_secret(payload)
+            return
         try:
             current = load_yaml(config_file_path())
             data = _build_config_dict(payload, current)
@@ -1261,7 +1518,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
             # does when the config seeds that file on first creation.
             for persona_name, soul in souls.items():
                 write_persona_soul(persona_name, resolve_env(soul))
-            path = _write_config_text(text)
+            path = write_config_text(text)
         except ValueError as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
@@ -1269,6 +1526,22 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"ok": False, "error": f"Could not write file: {exc}"})
             return
         self._send_json(200, {"ok": True, "path": str(path)})
+
+    def _handle_post_secret(self, payload: dict[str, Any]) -> None:
+        """Store a secret's value in the file backend; the reply never echoes it."""
+        name, value = payload.get("name"), payload.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            self._send_json(400, {"ok": False, "error": "Body must send string name and value."})
+            return
+        try:
+            source = store_secret_value(name.strip(), value)
+        except ValueError as exc:  # includes ConfigError
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        except OSError as exc:
+            self._send_json(500, {"ok": False, "error": f"Could not write secret: {exc}"})
+            return
+        self._send_json(200, {"ok": True, "source": source})
 
     def _handle_get_config(self) -> None:
         path = config_file_path()
@@ -1288,9 +1561,15 @@ class ConfigHandler(BaseHTTPRequestHandler):
             # The form has to show the prompt the agent actually uses: the persona's
             # stored SOUL.md, not the config value that only seeds it.
             _effective_persona_souls(data)
+            # Never hand out a resolved or literal secret value.
+            redactor = _response_redactor(data)
             self._send_json(
-                200, {"exists": True, "path": str(path), "text": text, "data": data}
-            )
+                200,
+                {
+                    "exists": True, "path": str(path), "text": redactor.redact(text),
+                    "data": redactor.redact_obj(data),
+                },
+            )  # fmt: skip
         else:
             self._send_json(200, {"exists": False, "path": str(path), "text": None, "data": {}})
 

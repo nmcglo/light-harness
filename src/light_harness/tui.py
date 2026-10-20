@@ -149,6 +149,15 @@ class TurnView:
         self._stop_spin()
         self._flush()
 
+    def pause(self) -> None:
+        """Stop the spinner and live region so a question can be asked."""
+        self._stop_spin()
+        self._flush()
+
+    def resume(self) -> None:
+        """Continue after :meth:`pause`."""
+        self._spin()
+
     # -- internals ----------------------------------------------------------
 
     def _head(self) -> None:

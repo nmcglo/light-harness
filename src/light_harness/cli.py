@@ -4,6 +4,8 @@
 an interactive REPL. ``agent tools`` lists the registered tools.
 ``agent web`` serves a small web UI for viewing and editing the config file.
 ``agent webhooks`` serves the configured webhook listeners.
+``agent secrets list`` / ``agent secrets set NAME`` inspect secrets and store a
+value in the file backend (values are never printed).
 
 The commands are synchronous Typer commands that drive the async agent via
 ``asyncio.run`` -- this keeps the entrypoint portable across Typer versions.
@@ -41,8 +43,10 @@ from .config import (
     ensure_persona,
     load_default_dotenv,
     persona_sessions_dir,
+    store_secret_value,
 )
 from .llm import LLMError, OpenAICompatibleClient
+from .secrets import Redactor, SecretContext, SecretLeakError, with_secret_note
 from .sessions import SessionLog
 from .tools import ToolRegistry, build_tool_registry
 from .tui import TurnView, glyphs_for, is_interactive
@@ -95,13 +99,40 @@ def _build_agent(
     tools: ToolRegistry,
     system_prompt: str,
     session: SessionLog | None = None,
+    redactor: Redactor | None = None,
+    secret_context: SecretContext | None = None,
 ) -> Agent:
     return Agent(
-        client=OpenAICompatibleClient(settings),
+        client=OpenAICompatibleClient(settings, guard=redactor),
         tools=tools,
         system_prompt=system_prompt,
         session=session,
+        redactor=redactor,
+        secret_context=secret_context,
     )
+
+
+class _Confirmer:
+    """Asks on the terminal before a ``confirm:`` secret is used. ``view`` is the
+    turn being rendered, paused while the question is on screen."""
+
+    def __init__(self) -> None:
+        self.view: TurnView | None = None
+
+    def __call__(self, name: str, tool: str, host: str) -> bool:
+        if self.view is not None:
+            self.view.pause()
+        try:
+            answer = console.input(
+                f"[yellow]Allow [bold]{escape(tool)}[/bold] to use secret "
+                f"[bold]{escape(name)}[/bold] for {escape(host)}?[/yellow] [y/N] "
+            )
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        finally:
+            if self.view is not None:
+                self.view.resume()
+        return answer.strip().lower() in ("y", "yes")
 
 
 @app.command()
@@ -129,14 +160,19 @@ def chat(
     if not settings.api_key:
         console.print(
             "[red]No API key found.[/red] Set `api_key` on the agent's provider in "
-            "config.yaml (e.g. `api_key: $MY_KEY`)."
+            "config.yaml (e.g. `api_key: secret:openai` or `api_key: $MY_KEY`)."
         )
         raise typer.Exit(code=1)
 
-    registry = build_tool_registry(active.tools, active.workspace_path())
+    confirm = _Confirmer() if sys.stdin.isatty() else None
+    secrets = config.tool_secrets(active, "chat", confirm)
+    registry = build_tool_registry(active.tools, active.workspace_path(), secrets)
+    redactor = config.redactor()
     persona_name = active.persona or active.name
     try:
-        system_prompt = config.system_prompt_for(active)
+        system_prompt = with_secret_note(
+            config.system_prompt_for(active), secrets, registry.names()
+        )
         ensure_persona(persona_name)
     except ValueError as exc:
         err_console.print(f"[red]Error:[/red] {exc}")
@@ -144,8 +180,12 @@ def chat(
     session = SessionLog(
         persona_sessions_dir(persona_name),
         meta={"persona": persona_name, "agent": active.name, "model": settings.model},
+        redactor=redactor,
     )
-    agent = _build_agent(settings, registry, system_prompt, session=session)
+    agent = _build_agent(
+        settings, registry, system_prompt, session=session, redactor=redactor,
+        secret_context=secrets.context,
+    )  # fmt: skip
     ui = _start_webui(webui, webui_host, webui_port)
     try:
         asyncio.run(_run_agent(agent, prompt))
@@ -159,10 +199,65 @@ def tools() -> None:
     """List the tools the agent will use (per the current config)."""
     config = _load_config()
     active = config.active_agent()
-    registry = build_tool_registry(active.tools, active.workspace_path())
+    registry = build_tool_registry(
+        active.tools, active.workspace_path(), config.tool_secrets(active, "chat")
+    )
     for spec in registry.tool_schemas():
         fn = spec["function"]
         console.print(f"[bold]{fn['name']}[/bold] -- {fn['description']}")
+
+
+secrets_app = typer.Typer(help="Inspect secrets and store their values (never printed).")
+app.add_typer(secrets_app, name="secrets")
+
+
+@secrets_app.command("list")
+def secrets_list() -> None:
+    """List the configured secrets: source, whether it resolves, and its policy."""
+    config = _load_config()
+    names = config.secrets.names()
+    if not names:
+        console.print("[dim]no secrets configured[/dim]")
+    for name in names:
+        spec = config.secrets.spec(name)
+        assert spec is not None
+        state = "[green]set[/green]" if config.secrets.is_resolved(name) else "[red]unset[/red]"
+        console.print(f"[bold]{escape(name)}[/bold] {escape(spec.source)} {state}")
+        allow = spec.allow
+        if allow is None:
+            console.print("  [dim]no allow policy: no tool may use it[/dim]")
+            continue
+        for label, values in (
+            ("tools", allow.tools), ("hosts", allow.hosts),
+            ("agents", allow.agents), ("interactions", allow.interactions),
+        ):  # fmt: skip
+            shown = "any" if values is None else (", ".join(values) or "(none)")
+            console.print(f"  [dim]{label}:[/dim] {escape(shown)}")
+        extras = [f"confirm={spec.confirm}"]
+        if spec.expires is not None:
+            extras.append(f"expires={spec.expires.isoformat()}")
+        if spec.deny_after_untrusted:
+            extras.append("deny_after_untrusted")
+        console.print(f"  [dim]{' '.join(extras)}[/dim]")
+
+
+@secrets_app.command("set")
+def secrets_set(
+    name: Annotated[str, typer.Argument(help="Secret name (as in secrets:).")],
+) -> None:
+    """Store a secret's value in the file backend (<home>/secrets/<name>, mode 0600)
+    and point secrets.<name>.source at it. Reads the value from a hidden prompt,
+    or from stdin when it is not a terminal."""
+    if sys.stdin.isatty():
+        value = typer.prompt(f"Value for {name}", hide_input=True, confirmation_prompt=True)
+    else:
+        value = sys.stdin.read().rstrip("\r\n")
+    try:
+        source = store_secret_value(name, value)
+    except (ValueError, OSError) as exc:  # ConfigError is a ValueError
+        err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=1) from None
+    console.print(f"stored [bold]{escape(name)}[/bold] -> {escape(source)}")
 
 
 WebuiOpt = Annotated[
@@ -266,14 +361,16 @@ async def _run_turn(agent: Agent, prompt: str) -> None:
     try:
         interrupted = await _stream_turn(agent, prompt)
     except Exception as exc:  # noqa: BLE001 - report any failed run, not a traceback
-        err_console.print(f"[red]Error:[/red] {_describe_failure(exc)}")
+        err_console.print(f"[red]Error:[/red] {_describe_failure(exc, agent.redactor)}")
         raise typer.Exit(code=1) from None
     if interrupted:
         raise typer.Exit(code=130)
 
 
-def _describe_failure(exc: Exception) -> str:
-    """A one-line, actionable description of why a turn failed (Rich markup-safe)."""
+def _describe_failure(exc: Exception, redactor: Redactor | None = None) -> str:
+    """A one-line, actionable description of why a turn failed (Rich markup-safe).
+    Exception text goes through ``redactor``, so a secret in it is not printed."""
+    redact = redactor.redact if redactor is not None else (lambda text: text)
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status in (401, 403):
@@ -294,9 +391,9 @@ def _describe_failure(exc: Exception) -> str:
         if isinstance(exc, httpx.TimeoutException):
             return f"the request to{where} timed out -- it may be slow or unreachable"
         return f"could not reach{where} -- check the provider's base_url and your network"
-    if isinstance(exc, LLMError):
-        return escape(str(exc))
-    return escape(f"{type(exc).__name__}: {exc}")
+    if isinstance(exc, (LLMError, SecretLeakError)):
+        return escape(redact(str(exc)))
+    return escape(redact(f"{type(exc).__name__}: {exc}"))
 
 
 async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> bool:
@@ -307,6 +404,16 @@ async def _stream_turn(agent: Agent, prompt: str, *, label: bool = False) -> boo
     Ctrl-C while the turn runs cancels just this turn (the agent keeps what had
     streamed so far in its history); returns True if the turn was interrupted."""
     view = TurnView(console, label=label)
+    if isinstance(confirm := getattr(agent.secret_context, "confirm", None), _Confirmer):
+        confirm.view = view
+    secret = agent.secret_in(prompt)
+    if secret is not None:
+        err_console.print(
+            f"[yellow]Warning:[/yellow] your message contains the value of secret "
+            f"'{escape(secret)}'; it was replaced with {escape(f'[REDACTED:{secret}]')} "
+            "before being stored or sent.",
+            highlight=False,
+        )
     loop = asyncio.get_running_loop()
     task = asyncio.ensure_future(agent.run(prompt, on_token=view.token, on_tool=view.tool))
     interrupted = False
@@ -343,6 +450,7 @@ _COMMANDS = {
     "/help": "show the available commands",
     "/clear": "forget the conversation so far",
     "/tools": "list the tools the agent can use",
+    "/system_prompt": "show the system prompt the agent was given",
     "/exit": "leave the chat",
     "/quit": "leave the chat",
 }
@@ -435,7 +543,7 @@ def _run_command(agent: Agent, line: str) -> bool:
         return True
     if name == "/help":
         for command, text in _COMMANDS.items():
-            console.print(f"  [cyan]{command:<7}[/cyan] [dim]{text}[/dim]")
+            console.print(f"  [cyan]{command:<14}[/cyan] [dim]{text}[/dim]")
     elif name == "/clear":
         agent.reset()
         console.print("[dim]conversation cleared[/dim]")
@@ -446,6 +554,9 @@ def _run_command(agent: Agent, line: str) -> bool:
         for spec in specs:
             fn = spec["function"]
             console.print(f"  [bold]{fn['name']}[/bold] [dim]{escape(fn['description'])}[/dim]")
+    elif name == "/system_prompt":
+        # Verbatim: no markup or highlighting, so brackets in the prompt survive.
+        console.print(agent.system_prompt, markup=False, highlight=False)
     else:
         console.print(f"[red]unknown command[/red] {escape(name)} [dim](try /help)[/dim]")
     return False
@@ -487,7 +598,8 @@ async def _run_repl(agent: Agent, read_line: ReadLine | None = None) -> None:
                 )
         except Exception as exc:  # noqa: BLE001 - one failed turn must not end the session
             err_console.print(
-                f"[red]{glyphs_for(err_console).error} Error:[/red] {_describe_failure(exc)}"
+                f"[red]{glyphs_for(err_console).error} Error:[/red] "
+                f"{_describe_failure(exc, agent.redactor)}"
             )
     console.print(f"\n[dim]bye{glyphs_for(console).bye}[/dim]")
 

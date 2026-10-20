@@ -16,8 +16,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ...secrets import SecretValue
 from .common import (
     ForgejoError,
+    ForgejoTool,
     ensure_comment_belongs,
     positive_id,
     require_token,
@@ -75,7 +77,7 @@ def _json(response: httpx.Response) -> Any:
 
 
 async def _label_ids(
-    names: list[str], *, base: str, slug: str, token: str | None,
+    names: list[str], *, base: str, slug: str, token: SecretValue | None,
     client: httpx.AsyncClient | None, timeout: float,
 ) -> list[int]:  # fmt: skip
     """The ids of the repo labels called ``names``; an unknown name is an error that
@@ -127,7 +129,7 @@ async def create_issue(
     instance_url: str | None = None,
     repo: str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -163,7 +165,7 @@ async def list_issues(
     instance_url: str | None = None,
     repo: str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -209,7 +211,7 @@ async def get_issue(
     repo: str | None = None,
     issue_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -238,7 +240,7 @@ async def update_issue(
     repo: str | None = None,
     issue_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -292,7 +294,7 @@ async def comment_on_issue(
     repo: str | None = None,
     issue_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -315,7 +317,6 @@ _REPO_PROPERTIES: dict[str, Any] = {
         "description": "Instance base URL, e.g. https://forgejo.example.com",
     },
     "repo": {"type": "string", "description": "Repository as 'owner/name'"},
-    "token": {"type": "string", "description": "API token"},
 }
 _ISSUE_PROPERTIES: dict[str, Any] = {
     **_REPO_PROPERTIES,
@@ -325,8 +326,8 @@ _ISSUE_PROPERTIES: dict[str, Any] = {
     },
     "issue_number": {"type": "integer"},
 }
-_REPO_KEYS = ("instance_url", "repo", "url", "token")
-_ISSUE_KEYS = ("instance_url", "repo", "issue_number", "url", "token")
+_REPO_KEYS = ("instance_url", "repo", "url")
+_ISSUE_KEYS = ("instance_url", "repo", "issue_number", "url")
 _WHERE_REPO = "Provide either 'url' (repo URL) or 'instance_url' + 'repo' ('owner/name')."
 _WHERE_ISSUE = (
     "Provide either 'url' (issue URL) or 'instance_url' + 'repo' ('owner/name') + "
@@ -340,14 +341,14 @@ _LABELS = {
 _ASSIGNEES = {"type": "array", "items": {"type": "string"}, "description": "Usernames"}
 
 
-class ForgejoIssueCreateTool:
+class ForgejoIssueCreateTool(ForgejoTool):
     """Open an issue in a Forgejo repository."""
 
     name = "forgejo_issue_create"
     description = (
         "Create an issue in a Forgejo repository and return it (JSON). 'title' is required; "
         "'body' (Markdown), 'labels' (existing label names) and 'assignees' (usernames) are "
-        f"optional. {_WHERE_REPO} 'token' (API token) is required."
+        f"optional. {_WHERE_REPO}"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -358,7 +359,7 @@ class ForgejoIssueCreateTool:
             "labels": _LABELS,
             "assignees": _ASSIGNEES,
         },
-        "required": ["title", "token"],
+        "required": ["title"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
@@ -367,22 +368,22 @@ class ForgejoIssueCreateTool:
             body=arguments.get("body") or "",
             labels=arguments.get("labels"),
             assignees=arguments.get("assignees"),
-            **{k: arguments.get(k) for k in _REPO_KEYS},
+            **self._args(arguments, _REPO_KEYS),
         )
         return json.dumps(issue, indent=2)
 
 
-class ForgejoIssueListTool:
+class ForgejoIssueListTool(ForgejoTool):
     """List a Forgejo repository's issues."""
 
     name = "forgejo_issue_list"
+    untrusted_output = True
     description = (
         "List issues (not pull requests) of a Forgejo repository as short summaries (number, "
         "title, state, author, labels, assignees, comment count, dates, link), newest first. "
         "'state' is open (default), closed or all; 'labels' keeps issues with all the named "
         "labels; 'query' searches text; 'limit' (default 30, max 50) and 'page' paginate "
-        f"(the reply includes 'total'). {_WHERE_REPO} 'token' is optional (needed for "
-        "private repos)."
+        f"(the reply includes 'total'). {_WHERE_REPO}"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -403,19 +404,20 @@ class ForgejoIssueListTool:
             query=arguments.get("query"),
             limit=arguments.get("limit") or 30,
             page=arguments.get("page") or 1,
-            **{k: arguments.get(k) for k in _REPO_KEYS},
+            **self._args(arguments, _REPO_KEYS),
         )
         return json.dumps(result, indent=2)
 
 
-class ForgejoIssueTool:
+class ForgejoIssueTool(ForgejoTool):
     """Read one Forgejo issue."""
 
     name = "forgejo_issue"
+    untrusted_output = True
     description = (
         "Fetch one Forgejo issue's details (JSON): title, body, state, labels, assignees, "
         "dates. Set 'include_comments' to also get its comments as 'comment_list'. "
-        f"{_WHERE_ISSUE} 'token' is optional (needed for private repos)."
+        f"{_WHERE_ISSUE}"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -428,12 +430,12 @@ class ForgejoIssueTool:
     async def run(self, arguments: dict[str, Any]) -> str:
         issue = await get_issue(
             include_comments=bool(arguments.get("include_comments")),
-            **{k: arguments.get(k) for k in _ISSUE_KEYS},
+            **self._args(arguments, _ISSUE_KEYS),
         )
         return json.dumps(issue, indent=2)
 
 
-class ForgejoIssueUpdateTool:
+class ForgejoIssueUpdateTool(ForgejoTool):
     """Edit, close or reopen a Forgejo issue."""
 
     name = "forgejo_issue_update"
@@ -441,7 +443,7 @@ class ForgejoIssueUpdateTool:
         "Change a Forgejo issue and return it as it now is (JSON). Pass only what should "
         "change: 'title', 'body', 'state' (open / closed: reopen or close the issue), "
         "'assignees' and 'labels' (both REPLACE the current ones; [] clears them). "
-        f"{_WHERE_ISSUE} 'token' (API token) is required."
+        f"{_WHERE_ISSUE}"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -453,7 +455,6 @@ class ForgejoIssueUpdateTool:
             "labels": _LABELS,
             "assignees": _ASSIGNEES,
         },
-        "required": ["token"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
@@ -463,19 +464,18 @@ class ForgejoIssueUpdateTool:
             state=arguments.get("state"),
             assignees=arguments.get("assignees"),
             labels=arguments.get("labels"),
-            **{k: arguments.get(k) for k in _ISSUE_KEYS},
+            **self._args(arguments, _ISSUE_KEYS),
         )
         return json.dumps(issue, indent=2)
 
 
-class ForgejoIssueCommentTool:
+class ForgejoIssueCommentTool(ForgejoTool):
     """Comment on a Forgejo issue."""
 
     name = "forgejo_issue_comment"
     description = (
         "Post a comment on a Forgejo issue and return the created comment (JSON). "
-        f"'body' is the comment text (Markdown). {_WHERE_ISSUE} 'token' (API token) is "
-        "required."
+        f"'body' is the comment text (Markdown). {_WHERE_ISSUE}"
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -483,12 +483,12 @@ class ForgejoIssueCommentTool:
             **_ISSUE_PROPERTIES,
             "body": {"type": "string", "description": "Comment text (Markdown)"},
         },
-        "required": ["body", "token"],
+        "required": ["body"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         comment = await comment_on_issue(
-            body=arguments.get("body") or "", **{k: arguments.get(k) for k in _ISSUE_KEYS}
+            body=arguments.get("body") or "", **self._args(arguments, _ISSUE_KEYS)
         )
         return json.dumps(comment, indent=2)
 
@@ -501,7 +501,7 @@ async def edit_issue_comment(
     repo: str | None = None,
     issue_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -531,7 +531,7 @@ async def delete_issue_comment(
     repo: str | None = None,
     issue_number: int | str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -553,7 +553,7 @@ async def delete_issue_comment(
 _COMMENT_ID = {"type": "integer", "description": "Numeric comment id"}
 
 
-class ForgejoIssueCommentEditTool:
+class ForgejoIssueCommentEditTool(ForgejoTool):
     """Edit a comment on a Forgejo issue."""
 
     name = "forgejo_issue_comment_edit"
@@ -562,7 +562,7 @@ class ForgejoIssueCommentEditTool:
         "(JSON). 'comment_id' is the comment's numeric id (the 'id' returned by "
         "forgejo_issue_comment, or the number in '#issuecomment-N' of its link); it must "
         f"belong to the named issue. 'body' is the new text (Markdown). {_WHERE_ISSUE} "
-        "'token' (API token) is required, and must be allowed to edit that comment."
+        "The configured token must be allowed to edit that comment."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -571,19 +571,19 @@ class ForgejoIssueCommentEditTool:
             "comment_id": _COMMENT_ID,
             "body": {"type": "string", "description": "New comment text (Markdown)"},
         },
-        "required": ["comment_id", "body", "token"],
+        "required": ["comment_id", "body"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         comment = await edit_issue_comment(
             comment_id=arguments.get("comment_id"),
             body=arguments.get("body") or "",
-            **{k: arguments.get(k) for k in _ISSUE_KEYS},
+            **self._args(arguments, _ISSUE_KEYS),
         )
         return json.dumps(comment, indent=2)
 
 
-class ForgejoIssueCommentDeleteTool:
+class ForgejoIssueCommentDeleteTool(ForgejoTool):
     """Delete a comment from a Forgejo issue."""
 
     name = "forgejo_issue_comment_delete"
@@ -591,17 +591,17 @@ class ForgejoIssueCommentDeleteTool:
         "Delete a comment from a Forgejo issue via the Forgejo API (irreversible). "
         "'comment_id' is the comment's numeric id (the 'id' returned by "
         "forgejo_issue_comment, or the number in '#issuecomment-N' of its link); it must "
-        f"belong to the named issue. {_WHERE_ISSUE} 'token' (API token) is required, and "
+        f"belong to the named issue. {_WHERE_ISSUE} The configured token "
         "must be allowed to delete that comment."
     )
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {**_ISSUE_PROPERTIES, "comment_id": _COMMENT_ID},
-        "required": ["comment_id", "token"],
+        "required": ["comment_id"],
     }
 
     async def run(self, arguments: dict[str, Any]) -> str:
         result = await delete_issue_comment(
-            comment_id=arguments.get("comment_id"), **{k: arguments.get(k) for k in _ISSUE_KEYS}
+            comment_id=arguments.get("comment_id"), **self._args(arguments, _ISSUE_KEYS)
         )
         return json.dumps(result)

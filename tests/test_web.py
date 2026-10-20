@@ -926,3 +926,61 @@ def test_post_rejects_a_non_boolean_output_log(web_base: str, tmp_path: Path) ->
     assert status == 400
     assert "output_log: expected a boolean" in data["error"]
     assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == "agents:\n  - name: a\n"
+
+
+def test_api_never_returns_secret_values_and_keeps_redacted_literals_on_save(
+    web_base: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEB_T_KEY", "resolved-key-value-1234")
+    (tmp_path / "config.yaml").write_text(
+        "secrets:\n  openai: {source: env:WEB_T_KEY}\n"
+        "providers:\n"
+        "  a: {api_key: 'secret:openai'}\n"
+        "  legacy: {api_key: legacy-literal-key}\n"
+        "personas:\n  p: {SOUL.md: 'the key is $WEB_T_KEY'}\n",
+        encoding="utf-8",
+    )
+    status, body = _get(web_base + "/api/config")
+    assert status == 200
+    assert "resolved-key-value-1234" not in body and "legacy-literal-key" not in body
+    data = json.loads(body)["data"]
+    assert data["providers"]["a"]["api_key"] == "secret:openai"  # the reference is shown
+    shown = data["providers"]["legacy"]["api_key"]
+    assert shown == "[REDACTED:providers.legacy.api_key]"
+
+    # Saving the form back as shown keeps the literal on disk instead of the placeholder.
+    providers = [{"name": n, **spec} for n, spec in data["providers"].items()]
+    status, reply = _post(web_base + "/api/config", {"providers": providers})
+    assert status == 200, reply
+    saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert saved["providers"]["legacy"]["api_key"] == "legacy-literal-key"
+
+    # A value pasted as a source is refused.
+    status, reply = _post(
+        web_base + "/api/config", {"secrets": [{"name": "x", "source": "hunter2hunter2"}]}
+    )
+    assert status == 400 and "env:NAME or file:PATH" in reply["error"]
+
+
+def test_secret_value_goes_to_the_file_backend_not_the_config(
+    web_base: str, tmp_path: Path
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "secrets:\n  forge:\n    source: env:UNSET_X\n"
+        "    allow: {tools: [forgejo_pr], hosts: [h]}\n",
+        encoding="utf-8",
+    )
+    status, reply = _post(web_base + "/api/secret", {"name": "forge", "value": "v4lue-v4lue"})
+    assert status == 200 and reply == {"ok": True, "source": "file:secrets/forge"}
+
+    stored = tmp_path / "secrets" / "forge"
+    assert stored.read_text(encoding="utf-8") == "v4lue-v4lue"
+    assert stored.stat().st_mode & 0o777 == 0o600
+    text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "v4lue" not in text
+    saved = yaml.safe_load(text)["secrets"]["forge"]
+    allow = {"tools": ["forgejo_pr"], "hosts": ["h"]}
+    assert saved == {"source": "file:secrets/forge", "allow": allow}
+    assert Config.load().secrets.values()["forge"] == "v4lue-v4lue"
+    status, body = _get(web_base + "/api/config")
+    assert "v4lue" not in body

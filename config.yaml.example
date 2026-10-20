@@ -3,15 +3,20 @@
 # Copy to $LIGHT_HARNESS_HOME/config.yaml (default: ~/.light-harness/config.yaml).
 # The file is optional. Precedence: config file > built-in default.
 # Values may reference env vars ($NAME or ${NAME}); set vars are substituted and
-# unset ones are left as-is. Exception: a provider `api_key` or webhook `secret`
-# that references an unset var is cleared / disabled (with a warning), never used
-# literally.
+# unset ones are left as-is.
+#
+# Credentials never go in this file. `secrets:` names each one by reference
+# (env:NAME or file:PATH) plus the policy saying which tools, hosts, agents and
+# interactions may use it. A provider `api_key` or webhook `secret` references one
+# as secret:NAME (or $NAME, registered as env:NAME). An unresolved reference clears
+# the key / disables the webhook (with a warning); it is never used literally.
 #
 # `providers:` defines the endpoints you can use. Each provider lists the models it
 # offers (the set you can switch among).
 #
 # `agents:` is a list of named agents. Each agent picks a `provider`, `model`, an
-# optional `tools` list (opt-in), and an optional `persona` (a key under `personas:`).
+# optional `tools` list (opt-in), an optional `persona` (a key under `personas:`),
+# and optional `secrets` bindings (purpose -> secret name).
 #
 # `personas:` names the personas. Each named persona gets a directory under
 # LIGHT_HARNESS_HOME -- personas/<name>/ -- holding its SOUL.md plus a sessions/
@@ -28,19 +33,38 @@
 # `webhook_server:` tunes `agent webhooks`: `host`, `port`, extra `allowed_hosts`,
 # and `output_log` (log each webhook call, naming its run's session log file).
 #
-# There are no per-field env overrides; pull secrets in with $NAME as above.
-# LIGHT_HARNESS_HOME overrides the home dir.
+# There are no per-field env overrides. LIGHT_HARNESS_HOME overrides the home dir.
+
+secrets:
+  # A Forgejo API token. The Forgejo tools look it up by the instance's host;
+  # the model never sees or names it. Default deny: without both `tools` and
+  # `hosts` under `allow`, no tool may use a secret.
+  forgejo_main:
+    source: env:FORGEJO_TOKEN          # or file:/path, or file:secrets/name (in home)
+    allow:
+      tools: [forgejo_pr, forgejo_pr_diff, forgejo_pr_comment, forgejo_clone]
+      hosts: [git.example.com]
+      agents: [assistant]              # optional; omitted = any agent
+      interactions: [chat, webhook]    # optional; omitted = both
+    confirm: never                     # never | once-per-session | always (chat only)
+    # expires: 2027-01-01
+    # deny_after_untrusted: true       # refuse once webhook/issue/PR text is in the chat
+  # Provider keys need no `allow`: their own `api_key` field may always use them.
+  openai:
+    source: env:OPENAI_API_KEY
+  deploy_hook:
+    source: env:DEPLOY_WEBHOOK_SECRET
 
 providers:
   local:
     base_url: http://127.0.0.1:8000/v1
-    api_key: $LOCAL_API_KEY
+    api_key: $LOCAL_API_KEY            # $NAME works too
     timeout: 60
     models:
       - qwen3.8:27b
   openai:
     base_url: https://api.openai.com/v1
-    api_key: $OPENAI_API_KEY
+    api_key: secret:openai
     models:
       - gpt-4o-mini
       - gpt-4o
@@ -63,6 +87,9 @@ agents:
       - current_time
     # Optional persona (a key under `personas:`); its SOUL.md becomes the system prompt.
     persona: default
+    # Optional: pin the secret the Forgejo tools use (its policy still applies).
+    # secrets:
+    #   forgejo: forgejo_main
   - name: terse
     provider: openai
     model: gpt-4o-mini
@@ -85,7 +112,7 @@ webhooks:
   # `system_prompt` that overrides the agent's default system prompt.
   - path: /hooks/deploy
     agent: assistant
-    secret: $DEPLOY_WEBHOOK_SECRET
+    secret: secret:deploy_hook
   - path: /hooks/issues
     agent: terse
     system_prompt: You are a terse issue-triage bot.

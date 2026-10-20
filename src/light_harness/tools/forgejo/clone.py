@@ -4,9 +4,11 @@
 :class:`Tool` confined to an agent's workspace. Accepts either a repository ``url``
 (``https://host/owner/repo``) or ``instance_url`` + ``repo`` (``owner/name``).
 
-The API token never lands in ``argv`` or in the clone's ``.git/config``: it is passed
-to git as an ``Authorization`` header through ``GIT_CONFIG_*`` environment variables.
-With a token, redirects are not followed, so it cannot be forwarded to another host.
+The API token (looked up in the secret registry for the target host, never named
+by the model) never lands in ``argv`` or in the clone's ``.git/config``: it is
+passed to git as an ``Authorization`` header through ``GIT_CONFIG_*`` environment
+variables. With a token, redirects are not followed, so it cannot be forwarded to
+another host.
 """
 
 from __future__ import annotations
@@ -20,19 +22,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from ...secrets import SecretValue, ToolSecrets
 from ..workspace import Workspace, WorkspaceError
-from .common import ForgejoError, resolve_repo
+from .common import ForgejoError, ForgejoTool, resolve_repo
 
 DEFAULT_CLONE_TIMEOUT = 300.0
 _MAX_STDERR = 600
 
 
-def _git_env(token: str | None) -> dict[str, str]:
+def _git_env(token: SecretValue | None) -> dict[str, str]:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     if token:
         settings = [
-            ("http.extraHeader", f"Authorization: token {token}"),
+            ("http.extraHeader", f"Authorization: token {token.reveal()}"),
             ("http.followRedirects", "false"),
         ]
         env["GIT_CONFIG_COUNT"] = str(len(settings))
@@ -43,7 +46,7 @@ def _git_env(token: str | None) -> dict[str, str]:
 
 
 async def _git(
-    args: list[str], env: dict[str, str], timeout: float, token: str | None
+    args: list[str], env: dict[str, str], timeout: float, token: SecretValue | None
 ) -> tuple[int, str, str]:
     """Run ``git`` and return ``(returncode, stdout, stderr)``; the process is killed
     if the call is cancelled or times out."""
@@ -70,7 +73,7 @@ async def _git(
         raise
     text_err = err.decode("utf-8", "replace").strip()
     if token:
-        text_err = text_err.replace(token, "***")
+        text_err = text_err.replace(token.reveal(), "***")
     return proc.returncode or 0, out.decode("utf-8", "replace").strip(), text_err
 
 
@@ -85,7 +88,7 @@ async def clone_repo(
     instance_url: str | None = None,
     repo: str | None = None,
     url: str | None = None,
-    token: str | None = None,
+    token: SecretValue | None = None,
     branch: str | None = None,
     depth: int | None = None,
     workspace: Workspace | None = None,
@@ -146,7 +149,7 @@ def _discard(dest: Path, existed: bool) -> None:
             shutil.rmtree(dest, ignore_errors=True)
 
 
-class ForgejoCloneTool:
+class ForgejoCloneTool(ForgejoTool):
     """Clone a Forgejo repository into the agent's workspace."""
 
     name = "forgejo_clone"
@@ -155,7 +158,7 @@ class ForgejoCloneTool:
         "return its path, branch and HEAD commit (JSON). Provide 'path' (destination, "
         "relative to the workspace root; must not exist or be empty) plus either 'url' "
         "(https://host/owner/repo) or 'instance_url' + 'repo' ('owner/name'). Optional "
-        "'token' (API token, for private repos), 'branch' and 'depth' (shallow clone)."
+        "'branch' and 'depth' (shallow clone)."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -170,14 +173,14 @@ class ForgejoCloneTool:
                 "description": "Instance base URL, e.g. https://forgejo.example.com",
             },
             "repo": {"type": "string", "description": "Repository as 'owner/name'"},
-            "token": {"type": "string", "description": "Optional API token"},
             "branch": {"type": "string", "description": "Branch or tag to check out"},
             "depth": {"type": "integer", "description": "Shallow clone depth"},
         },
         "required": ["path"],
     }
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(self, workspace: Workspace, secrets: ToolSecrets | None = None) -> None:
+        super().__init__(secrets)
         self._workspace = workspace
 
     async def run(self, arguments: dict[str, Any]) -> str:
@@ -186,7 +189,7 @@ class ForgejoCloneTool:
             instance_url=arguments.get("instance_url"),
             repo=arguments.get("repo"),
             url=arguments.get("url"),
-            token=arguments.get("token"),
+            token=self._token(arguments),
             branch=arguments.get("branch"),
             depth=arguments.get("depth"),
             workspace=self._workspace,

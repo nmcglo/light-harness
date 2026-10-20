@@ -1,6 +1,10 @@
 """The agentic loop: user input -> LLM -> tool calls -> tool results -> LLM ->
 final answer, repeated until the model stops calling tools or the step budget
 is exhausted.
+
+Every message is passed through the :class:`Redactor` before it enters the
+conversation (and so the session log and the next request): a secret value a
+tool printed, or the user pasted, is replaced with ``[REDACTED:name]``.
 """
 
 from __future__ import annotations
@@ -9,7 +13,8 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from .llm import ChatMessage, LLMClient
+from .llm import ChatMessage, LLMClient, ToolCall
+from .secrets import Redactor, SecretContext
 from .sessions import SessionLog
 from .state import Conversation
 from .tools import ToolRegistry
@@ -30,6 +35,8 @@ class Agent:
         system_prompt: str = "You are a helpful assistant.",
         max_steps: int = 8,
         session: SessionLog | None = None,
+        redactor: Redactor | None = None,
+        secret_context: SecretContext | None = None,
     ) -> None:
         self.client = client
         self.tools = tools
@@ -37,10 +44,22 @@ class Agent:
         self.max_steps = max(1, max_steps)
         self.conversation = Conversation()
         self.session = session
+        self.redactor = redactor if redactor is not None else Redactor.empty()
+        # Shared with the tools' ToolSecrets: tells the secret policy whether
+        # untrusted content has entered the conversation.
+        self.secret_context = secret_context
 
     def reset(self) -> None:
         """Clear the conversation history (start a fresh session)."""
         self.conversation.reset()
+        if self.secret_context is not None and self.secret_context.interaction == "chat":
+            self.secret_context.untrusted = False
+
+    def secret_in(self, text: str) -> str | None:
+        """The name of a registered secret found in ``text`` (e.g. a pasted
+        prompt), or ``None``. The text is redacted when it is remembered anyway;
+        this lets callers warn the user."""
+        return self.redactor.find(text)
 
     async def run(
         self,
@@ -107,20 +126,48 @@ class Agent:
                         result = f"Error: invalid arguments for '{call.name}': {call.error}."
                     else:
                         result = await self.tools.run(call.name, call.arguments)
+                        self._note_untrusted(call.name, result)
+                    result = self.redactor.redact(result)
                     self._remember(
                         ChatMessage(role="tool", tool_call_id=call.id, content=result)
                     )
                     if on_tool is not None:
-                        on_tool(call.name, call.arguments, result)
+                        on_tool(call.name, self.redactor.redact_obj(call.arguments), result)
             else:
-                final = response.message.content
+                final = self.redactor.redact(response.message.content)
                 self._remember(ChatMessage(role="assistant", content=final))
                 return final
 
         return _STOPPED_MESSAGE
 
+    def _note_untrusted(self, name: str, result: str) -> None:
+        """Mark the conversation untrusted once a tool returned third-party text."""
+        tool = self.tools.get(name)
+        if (
+            self.secret_context is not None
+            and getattr(tool, "untrusted_output", False)
+            and not result.startswith("Error:")
+        ):
+            self.secret_context.untrusted = True
+
     def _remember(self, message: ChatMessage) -> None:
-        """Append ``message`` to the conversation and to the session log, if any."""
+        """Append ``message`` (redacted) to the conversation and to the session
+        log, if any."""
+        if self.redactor:
+            message = message.model_copy(
+                update={
+                    "content": self.redactor.redact(message.content),
+                    "tool_calls": [
+                        ToolCall(
+                            id=tc.id, name=tc.name, error=tc.error,
+                            arguments=self.redactor.redact_obj(tc.arguments),
+                        )  # fmt: skip
+                        for tc in message.tool_calls
+                    ]
+                    if message.tool_calls
+                    else message.tool_calls,
+                }
+            )
         self.conversation.add(message)
         if self.session is not None:
             self.session.record(message)

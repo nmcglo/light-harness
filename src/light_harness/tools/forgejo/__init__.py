@@ -1,13 +1,16 @@
 """Forgejo tools: read and act on pull requests and issues, and clone repositories.
 
 They are regular tools, available alongside the others unless an agent's ``tools:``
-list leaves them out. All talk to a Forgejo instance named per call. ``forgejo_clone``
+list leaves them out. All talk to a Forgejo instance named per call; the API token
+for that instance's host comes from the secret registry (the model never names it).
+``forgejo_clone``
 writes to disk, so -- like the file tools -- it exists only for an agent with a
 workspace.
 """
 
 from __future__ import annotations
 
+from ...secrets import ToolSecrets
 from ..base import Tool
 from ..workspace import Workspace
 from .clone import ForgejoCloneTool
@@ -57,28 +60,31 @@ FORGEJO_TOOL_NAMES: tuple[str, ...] = (
 FORGEJO_WORKSPACE_TOOL_NAMES: frozenset[str] = frozenset({ForgejoCloneTool.name})
 
 
-def forgejo_tools(workspace: Workspace | None = None) -> list[Tool]:
+def forgejo_tools(
+    workspace: Workspace | None = None, secrets: ToolSecrets | None = None
+) -> list[Tool]:
     """The Forgejo tools, in registration order (``forgejo_clone`` only with a
-    ``workspace``)."""
+    ``workspace``). ``secrets`` supplies their API tokens; without it they call
+    the API anonymously."""
     tools: list[Tool] = [
-        ForgejoPRTool(),
-        ForgejoPRDiffTool(),
-        ForgejoPRCommentTool(),
-        ForgejoPRCommentEditTool(),
-        ForgejoPRReviewTool(),
-        ForgejoPRCommentDeleteTool(),
-        ForgejoPRReviewDeleteTool(),
-        ForgejoPRCreateTool(),
-        ForgejoPRCloseTool(),
-        ForgejoPRMergeTool(),
-        ForgejoIssueCreateTool(),
-        ForgejoIssueListTool(),
-        ForgejoIssueTool(),
-        ForgejoIssueUpdateTool(),
-        ForgejoIssueCommentTool(),
-        ForgejoIssueCommentEditTool(),
-        ForgejoIssueCommentDeleteTool(),
+        ForgejoPRTool(secrets),
+        ForgejoPRDiffTool(secrets),
+        ForgejoPRCommentTool(secrets),
+        ForgejoPRCommentEditTool(secrets),
+        ForgejoPRReviewTool(secrets),
+        ForgejoPRCommentDeleteTool(secrets),
+        ForgejoPRReviewDeleteTool(secrets),
+        ForgejoPRCreateTool(secrets),
+        ForgejoPRCloseTool(secrets),
+        ForgejoPRMergeTool(secrets),
+        ForgejoIssueCreateTool(secrets),
+        ForgejoIssueListTool(secrets),
+        ForgejoIssueTool(secrets),
+        ForgejoIssueUpdateTool(secrets),
+        ForgejoIssueCommentTool(secrets),
+        ForgejoIssueCommentEditTool(secrets),
+        ForgejoIssueCommentDeleteTool(secrets),
     ]
     if workspace is not None:
-        tools.append(ForgejoCloneTool(workspace))
+        tools.append(ForgejoCloneTool(workspace, secrets))
     return tools
